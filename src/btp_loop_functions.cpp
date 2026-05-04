@@ -37,56 +37,92 @@ class CBTP_LoopFunctions : public CLoopFunctions {
 public:
    std::vector<Agent> agents;
    std::vector<BoxObs> obstacles;
+   std::vector<CVector3> waypoints;
 
    UInt32 step = 0;
    bool initialized = false;
+   UInt32 current_wp = 0;
 
    std::ofstream csv;
 
-   CVector3 start = CVector3(-3.0, -3.0, 1.0);
-   CVector3 goal  = CVector3( 3.0,  3.0, 1.0);
+   /*
+      Mission setup
+   */
+   Real flight_z = 1.15;
 
-   Real dt = 0.10;
+   CVector3 start = CVector3(-3.0, -3.0, 1.15);
+   CVector3 goal  = CVector3( 3.0,  3.0, 1.15);
 
-   Real rmin = 0.55;
-   Real rmax = 0.95;
-   Real rring = 0.75;
-   Real tau = 0.30;
+   /*
+      Protection band
+      Larger ring radius avoids decoy-decoy crowding.
+   */
+   Real rmin  = 0.65;
+   Real rmax  = 1.45;
+   Real rring = 1.12;
+   Real tau   = 0.45;
 
-   Real infl_step_max = 0.020;
-   Real dec_step_max  = 0.035;
+   /*
+      Step sizes are position increments per ARGoS tick.
+      Keep these small enough to avoid bouncing.
+   */
+   Real infl_step_max = 0.026;
+   Real dec_step_max  = 0.042;
 
-   Real k_goal_core = 0.030;
-   Real k_core_cohesion = 0.010;
-   Real k_infl_sep = 0.012;
+   /*
+      Influential core gains
+   */
+   Real k_goal_core     = 0.050;
+   Real k_core_cohesion = 0.012;
+   Real k_infl_sep      = 0.014;
+   Real k_obs_infl      = 0.045;
 
-   Real k_shape = 0.090;
-   Real k_band = 0.060;
-   Real k_dec_sep = 0.020;
-   Real k_follow = 0.025;
-   Real k_tangent = 0.004;
-   Real k_obs = 0.080;
+   /*
+      Decoy gains
+   */
+   Real k_shape   = 0.095;
+   Real k_band    = 0.065;
+   Real k_dec_sep = 0.035;
+   Real k_follow  = 0.025;
+   Real k_tangent = 0.002;
+   Real k_obs_dec = 0.050;
 
-   Real infl_sep_radius = 0.22;
-   Real dec_sep_radius  = 0.16;
+   Real infl_sep_radius = 0.25;
+   Real dec_sep_radius  = 0.22;
 
-   Real obs_safe = 0.35;
-   Real obs_influence = 1.10;
+   /*
+      Obstacle SDF parameters
+   */
+   Real obs_safe      = 0.28;
+   Real obs_influence = 1.00;
 
-   Real xmin = -5.0;
-   Real xmax =  5.0;
-   Real ymin = -5.0;
-   Real ymax =  5.0;
-   Real zmin =  0.30;
-   Real zmax =  2.50;
+   /*
+      Arena clamp
+   */
+   Real xmin = -4.8;
+   Real xmax =  4.8;
+   Real ymin = -4.8;
+   Real ymax =  4.8;
+   Real zmin =  0.70;
+   Real zmax =  2.20;
 
-   Real graph_radius = 1.20;
+   /*
+      Connectivity proxy graph radius
+   */
+   Real graph_radius = 1.65;
+
+   /*
+      Stuck detection
+   */
+   Real last_dist_to_wp = 1e9;
+   UInt32 stuck_counter = 0;
 
    void Init(TConfigurationNode&) override {
-      LOG << "BTP fresh 3D sim initialized" << std::endl;
+      LOG << "BTP 3D sim initialized: waypoint navigation + fixed altitude + ring protection" << std::endl;
 
       LoadAgents();
       InitObstacles();
+      InitWaypoints();
       InitDefinedFormation();
       OpenCSV();
    }
@@ -94,13 +130,19 @@ public:
    void Reset() override {
       agents.clear();
       obstacles.clear();
+      waypoints.clear();
+
       step = 0;
       initialized = false;
+      current_wp = 0;
+      last_dist_to_wp = 1e9;
+      stuck_counter = 0;
 
       if(csv.is_open()) csv.close();
 
       LoadAgents();
       InitObstacles();
+      InitWaypoints();
       InitDefinedFormation();
       OpenCSV();
    }
@@ -111,7 +153,7 @@ public:
 
    void OpenCSV() {
       csv.open("btp_argos_metrics.csv");
-      csv << "step,core_x,core_y,core_z,dist_goal,avg_band_error,min_decoy_decoy,min_obstacle_decoy,lambda2\n";
+      csv << "step,wp_index,core_x,core_y,core_z,dist_wp,dist_goal,avg_band_error,min_decoy_decoy,min_obstacle_decoy,lambda2_proxy\n";
    }
 
    void LoadAgents() {
@@ -154,16 +196,40 @@ public:
    void InitObstacles() {
       obstacles.clear();
 
+      /*
+         These match the visual buildings in test.argos.
+      */
       obstacles.push_back({CVector3(-1.7, -0.6, 0.8), CVector3(0.45, 0.80, 0.80), false});
       obstacles.push_back({CVector3( 1.4, -0.3, 0.9), CVector3(0.50, 0.65, 0.90), false});
       obstacles.push_back({CVector3(-0.8,  1.6, 0.9), CVector3(0.70, 0.45, 0.90), false});
       obstacles.push_back({CVector3( 2.2,  1.8, 0.8), CVector3(0.45, 0.55, 0.80), false});
 
+      /*
+         Internal moving aerial obstacles.
+         They are not visualized yet, but the controller avoids them.
+      */
       obstacles.push_back({CVector3(0.2, 0.8, 1.6), CVector3(0.25, 0.25, 0.25), true,
                            CVector3(0.80, 0.00, 0.20), 0.035, 0.0});
 
       obstacles.push_back({CVector3(1.0, -1.4, 1.5), CVector3(0.30, 0.20, 0.25), true,
                            CVector3(0.00, 0.80, 0.15), 0.025, 1.2});
+   }
+
+   void InitWaypoints() {
+      waypoints.clear();
+
+      /*
+         Safe route around the building cluster.
+         This prevents the classic potential-field local minimum.
+      */
+      waypoints.push_back(CVector3(-3.0, -3.0, flight_z));
+      waypoints.push_back(CVector3(-3.3, -0.6, flight_z));
+      waypoints.push_back(CVector3(-2.5,  2.8, flight_z));
+      waypoints.push_back(CVector3( 0.6,  3.4, flight_z));
+      waypoints.push_back(CVector3( 3.0,  3.0, flight_z));
+
+      current_wp = 1;
+      LOG << "Loaded " << waypoints.size() << " waypoints" << std::endl;
    }
 
    int CountInfl() const {
@@ -178,10 +244,28 @@ public:
       return c;
    }
 
+   CVector3 XYOnly(CVector3 v) const {
+      v.SetZ(0.0);
+      return v;
+   }
+
+   CVector3 SetFlightZ(CVector3 p) const {
+      p.SetZ(flight_z);
+      return p;
+   }
+
    CVector3 NormalizeSafe(const CVector3& v) const {
       Real L = v.Length();
       if(L < 1e-9) return CVector3(0,0,0);
       return v / L;
+   }
+
+   CVector3 NormalizeSafeXY(const CVector3& v) const {
+      CVector3 u = v;
+      u.SetZ(0.0);
+      Real L = u.Length();
+      if(L < 1e-9) return CVector3(0,0,0);
+      return u / L;
    }
 
    CVector3 Limit(const CVector3& v, Real max_mag) const {
@@ -190,10 +274,17 @@ public:
       return v;
    }
 
+   CVector3 LimitXY(CVector3 v, Real max_mag) const {
+      v.SetZ(0.0);
+      Real L = v.Length();
+      if(L > max_mag && L > 1e-9) return (v / L) * max_mag;
+      return v;
+   }
+
    CVector3 Clamp(CVector3 p) const {
       p.SetX(std::max(xmin, std::min(xmax, p.GetX())));
       p.SetY(std::max(ymin, std::min(ymax, p.GetY())));
-      p.SetZ(std::max(zmin, std::min(zmax, p.GetZ())));
+      p.SetZ(flight_z);
       return p;
    }
 
@@ -221,28 +312,26 @@ public:
       return outside + inside;
    }
 
-   CVector3 GradSDFBox(const CVector3& p, const BoxObs& o) const {
+   CVector3 GradSDFBoxXY(const CVector3& p, const BoxObs& o) const {
       Real e = 0.005;
 
       CVector3 ex(e,0,0);
       CVector3 ey(0,e,0);
-      CVector3 ez(0,0,e);
 
       Real gx = (SDFBox(p + ex, o) - SDFBox(p - ex, o)) / (2.0 * e);
       Real gy = (SDFBox(p + ey, o) - SDFBox(p - ey, o)) / (2.0 * e);
-      Real gz = (SDFBox(p + ez, o) - SDFBox(p - ez, o)) / (2.0 * e);
 
-      return NormalizeSafe(CVector3(gx, gy, gz));
+      return NormalizeSafeXY(CVector3(gx, gy, 0.0));
    }
 
-   CVector3 ObstacleForce(const CVector3& p) const {
+   CVector3 ObstacleForceXY(const CVector3& p, Real gain) const {
       CVector3 f(0,0,0);
 
       for(const auto& o : obstacles) {
          Real phi = SDFBox(p, o) - obs_safe;
 
          if(phi < obs_influence) {
-            CVector3 n = GradSDFBox(p, o);
+            CVector3 n = GradSDFBoxXY(p, o);
 
             Real mag = 0.0;
             if(phi <= 0.0) {
@@ -251,20 +340,24 @@ public:
                mag = (1.0 / std::max(phi, 1e-4)) - (1.0 / obs_influence);
             }
 
-            f += n * (k_obs * mag);
+            f += n * (gain * mag);
          }
       }
 
+      f.SetZ(0.0);
       return f;
    }
 
    CVector3 ProjectOutside(CVector3 p) const {
+      p.SetZ(flight_z);
+
       for(const auto& o : obstacles) {
          Real phi = SDFBox(p, o) - obs_safe;
 
          if(phi < 0.0) {
-            CVector3 n = GradSDFBox(p, o);
-            p += n * (-phi + 0.01);
+            CVector3 n = GradSDFBoxXY(p, o);
+            p += n * (-phi + 0.02);
+            p.SetZ(flight_z);
          }
       }
 
@@ -283,23 +376,71 @@ public:
       }
 
       if(n > 0) c /= n;
+      c.SetZ(flight_z);
       return c;
+   }
+
+   CVector3 CurrentTarget() const {
+      if(waypoints.empty()) return goal;
+      UInt32 idx = std::min(current_wp, static_cast<UInt32>(waypoints.size() - 1));
+      return waypoints[idx];
+   }
+
+   void UpdateWaypoint() {
+      if(waypoints.empty()) return;
+
+      CVector3 core = CoreCentroid();
+      CVector3 target = CurrentTarget();
+
+      Real dist = (target - core).Length();
+
+      /*
+         Move to next waypoint when close.
+      */
+      if(dist < 0.45 && current_wp < waypoints.size() - 1) {
+         current_wp++;
+         last_dist_to_wp = 1e9;
+         stuck_counter = 0;
+
+         LOG << "Switching to waypoint " << current_wp << std::endl;
+         return;
+      }
+
+      /*
+         Stuck escape:
+         if distance does not improve for too long, force next waypoint.
+      */
+      if(dist > last_dist_to_wp - 0.003) {
+         stuck_counter++;
+      } else {
+         stuck_counter = 0;
+      }
+
+      last_dist_to_wp = dist;
+
+      if(stuck_counter > 350 && current_wp < waypoints.size() - 1) {
+         current_wp++;
+         stuck_counter = 0;
+         last_dist_to_wp = 1e9;
+
+         LOG << "Stuck detected. Forcing waypoint " << current_wp << std::endl;
+      }
    }
 
    void InitDefinedFormation() {
       std::vector<CVector3> core_offsets = {
          CVector3( 0.00,  0.00, 0.00),
-         CVector3( 0.18,  0.00, 0.00),
-         CVector3(-0.18,  0.00, 0.00),
-         CVector3( 0.00,  0.18, 0.00),
-         CVector3( 0.00, -0.18, 0.00)
+         CVector3( 0.20,  0.00, 0.00),
+         CVector3(-0.20,  0.00, 0.00),
+         CVector3( 0.00,  0.20, 0.00),
+         CVector3( 0.00, -0.20, 0.00)
       };
 
       int i = 0;
       for(auto& a : agents) {
          if(!a.influential) continue;
 
-         a.pos = start + core_offsets[i % core_offsets.size()];
+         a.pos = SetFlightZ(start + core_offsets[i % core_offsets.size()]);
          a.vel = CVector3(0,0,0);
          i++;
       }
@@ -312,11 +453,11 @@ public:
 
          Real th = 2.0 * ARGOS_PI * static_cast<Real>(j) / std::max(1, ndec);
 
-         a.pos = start + CVector3(
+         a.pos = SetFlightZ(start + CVector3(
             rring * std::cos(th),
             rring * std::sin(th),
             0.0
-         );
+         ));
 
          a.vel = CVector3(0,0,0);
          a.slot = j;
@@ -326,7 +467,7 @@ public:
       ApplyMovement();
       initialized = true;
 
-      LOG << "Defined ring formation initialized" << std::endl;
+      LOG << "Defined ring formation initialized at fixed altitude z=" << flight_z << std::endl;
    }
 
    CVector3 InfluentialSeparation(const Agent& a) const {
@@ -335,11 +476,11 @@ public:
       for(const auto& b : agents) {
          if(!b.influential || a.id == b.id) continue;
 
-         CVector3 d = a.pos - b.pos;
+         CVector3 d = XYOnly(a.pos - b.pos);
          Real L = d.Length();
 
          if(L < infl_sep_radius && L > 1e-6) {
-            f += NormalizeSafe(d) * ((infl_sep_radius - L) / infl_sep_radius);
+            f += NormalizeSafeXY(d) * ((infl_sep_radius - L) / infl_sep_radius);
          }
       }
 
@@ -352,11 +493,11 @@ public:
       for(const auto& b : agents) {
          if(b.influential || a.id == b.id) continue;
 
-         CVector3 d = a.pos - b.pos;
+         CVector3 d = XYOnly(a.pos - b.pos);
          Real L = d.Length();
 
          if(L < dec_sep_radius && L > 1e-6) {
-            f += NormalizeSafe(d) * ((dec_sep_radius - L) / dec_sep_radius);
+            f += NormalizeSafeXY(d) * ((dec_sep_radius - L) / dec_sep_radius);
          }
       }
 
@@ -365,19 +506,19 @@ public:
 
    CVector3 BandForceNearestInfluential(const Agent& a) const {
       Real best = std::numeric_limits<Real>::max();
-      CVector3 nearest(0,0,0);
+      CVector3 nearest(0,0,flight_z);
 
       for(const auto& b : agents) {
          if(!b.influential) continue;
 
-         Real d = (a.pos - b.pos).Length();
+         Real d = XYOnly(a.pos - b.pos).Length();
          if(d < best) {
             best = d;
             nearest = b.pos;
          }
       }
 
-      CVector3 radial = a.pos - nearest;
+      CVector3 radial = XYOnly(a.pos - nearest);
       Real d = radial.Length();
 
       if(d < 1e-6) return CVector3(0.05,0,0);
@@ -402,60 +543,68 @@ public:
       if(ndec <= 0 || a.slot < 0) return core;
 
       Real th0 = 2.0 * ARGOS_PI * static_cast<Real>(a.slot) / ndec;
-      Real rot = 0.0015 * static_cast<Real>(step);
+
+      /*
+         Very slow rotation only; too much rotation causes bouncing.
+      */
+      Real rot = 0.0006 * static_cast<Real>(step);
       Real th = th0 + rot;
 
-      return core + CVector3(
+      return SetFlightZ(core + CVector3(
          rring * std::cos(th),
          rring * std::sin(th),
          0.0
-      );
+      ));
    }
 
    void UpdateInfluentials() {
       CVector3 core = CoreCentroid();
-      CVector3 to_goal = goal - core;
-      CVector3 goal_dir = NormalizeSafe(to_goal);
+      CVector3 target = CurrentTarget();
+
+      CVector3 to_target = XYOnly(target - core);
+      CVector3 target_dir = NormalizeSafeXY(to_target);
+
+      Real dist = to_target.Length();
+      Real slow = std::min(1.0, dist / 1.0);
 
       for(auto& a : agents) {
          if(!a.influential) continue;
 
-         CVector3 f_goal = goal_dir * k_goal_core;
+         CVector3 f_goal = target_dir * (k_goal_core * slow);
          CVector3 f_sep = InfluentialSeparation(a) * k_infl_sep;
-         CVector3 f_cohesion = (core - a.pos) * k_core_cohesion;
-         CVector3 f_obs = ObstacleForce(a.pos);
+         CVector3 f_cohesion = XYOnly(core - a.pos) * k_core_cohesion;
+         CVector3 f_obs = ObstacleForceXY(a.pos, k_obs_infl);
 
          CVector3 f = f_goal + f_sep + f_cohesion + f_obs;
 
-         if(to_goal.Length() < 0.35) f *= 0.20;
-
-         a.vel = Limit(f, infl_step_max);
+         a.vel = LimitXY(f, infl_step_max);
          a.pos = ProjectOutside(a.pos + a.vel);
       }
    }
 
    void UpdateDecoys() {
       CVector3 core = CoreCentroid();
-      CVector3 core_goal_dir = NormalizeSafe(goal - core);
+      CVector3 target = CurrentTarget();
+      CVector3 core_target_dir = NormalizeSafeXY(target - core);
 
       for(auto& a : agents) {
          if(a.influential) continue;
 
-         CVector3 target = SlotTarget(a, core);
+         CVector3 slot = SlotTarget(a, core);
 
-         CVector3 f_shape = (target - a.pos) * k_shape;
+         CVector3 f_shape = XYOnly(slot - a.pos) * k_shape;
          CVector3 f_band = BandForceNearestInfluential(a) * k_band;
          CVector3 f_sep = DecoySeparation(a) * k_dec_sep;
-         CVector3 f_follow = core_goal_dir * k_follow;
-         CVector3 f_obs = ObstacleForce(a.pos);
+         CVector3 f_follow = core_target_dir * k_follow;
+         CVector3 f_obs = ObstacleForceXY(a.pos, k_obs_dec);
 
-         CVector3 radial = NormalizeSafe(a.pos - core);
+         CVector3 radial = NormalizeSafeXY(a.pos - core);
          CVector3 tangent(-radial.GetY(), radial.GetX(), 0.0);
          CVector3 f_tangent = tangent * k_tangent;
 
          CVector3 f = f_shape + f_band + f_sep + f_follow + f_obs + f_tangent;
 
-         a.vel = Limit(f, dec_step_max);
+         a.vel = LimitXY(f, dec_step_max);
          a.pos = ProjectOutside(a.pos + a.vel);
       }
    }
@@ -471,7 +620,7 @@ public:
 
          for(const auto& b : agents) {
             if(!b.influential) continue;
-            best = std::min(best, (a.pos - b.pos).Length());
+            best = std::min(best, XYOnly(a.pos - b.pos).Length());
          }
 
          Real err = 0.0;
@@ -495,7 +644,7 @@ public:
 
          for(size_t j = i + 1; j < agents.size(); ++j) {
             if(agents[j].influential) continue;
-            best = std::min(best, (agents[i].pos - agents[j].pos).Length());
+            best = std::min(best, XYOnly(agents[i].pos - agents[j].pos).Length());
          }
       }
 
@@ -518,28 +667,23 @@ public:
       return best;
    }
 
-   Real Lambda2() const {
+   Real Lambda2Proxy() const {
       const int n = static_cast<int>(agents.size());
       if(n < 2) return 0.0;
 
-      std::vector<std::vector<Real>> A(n, std::vector<Real>(n, 0.0));
+      std::vector<std::vector<int>> A(n, std::vector<int>(n, 0));
 
       for(int i = 0; i < n; ++i) {
          for(int j = i + 1; j < n; ++j) {
-            Real d = (agents[i].pos - agents[j].pos).Length();
+            Real d = XYOnly(agents[i].pos - agents[j].pos).Length();
 
             if(d <= graph_radius) {
-               A[i][j] = 1.0;
-               A[j][i] = 1.0;
+               A[i][j] = 1;
+               A[j][i] = 1;
             }
          }
       }
 
-      /*
-         Lightweight connectivity proxy:
-         exact lambda2 needs eigen solver.
-         This returns 0 if graph disconnected, otherwise approximate average cut strength.
-      */
       std::vector<int> visited(n, 0);
       std::vector<int> stack;
       stack.push_back(0);
@@ -550,7 +694,7 @@ public:
          stack.pop_back();
 
          for(int v = 0; v < n; ++v) {
-            if(A[u][v] > 0.5 && !visited[v]) {
+            if(A[u][v] && !visited[v]) {
                visited[v] = 1;
                stack.push_back(v);
             }
@@ -576,6 +720,7 @@ public:
       q.FromEulerAngles(CRadians(0), CRadians(0), CRadians(0));
 
       for(auto& a : agents) {
+         a.pos = SetFlightZ(a.pos);
          a.entity->GetEmbodiedEntity().MoveTo(a.pos, q, false);
       }
    }
@@ -585,35 +730,43 @@ public:
 
       if(!initialized) InitDefinedFormation();
 
+      UpdateWaypoint();
+
       UpdateInfluentials();
       UpdateDecoys();
       ApplyMovement();
 
       if(csv.is_open() && step % 5 == 0) {
          CVector3 core = CoreCentroid();
+         CVector3 target = CurrentTarget();
 
          csv << step << ","
+             << current_wp << ","
              << core.GetX() << ","
              << core.GetY() << ","
              << core.GetZ() << ","
-             << (goal - core).Length() << ","
+             << XYOnly(target - core).Length() << ","
+             << XYOnly(goal - core).Length() << ","
              << AvgBandError() << ","
              << MinDecoyDistance() << ","
              << MinObstacleDecoyDistance() << ","
-             << Lambda2()
+             << Lambda2Proxy()
              << "\n";
       }
 
       if(step % 50 == 0) {
          CVector3 core = CoreCentroid();
+         CVector3 target = CurrentTarget();
 
-         LOG << "Step " << step
+         LOG << "[t=" << step << "]"
+             << " wp=" << current_wp
              << " core=(" << core.GetX() << "," << core.GetY() << "," << core.GetZ() << ")"
-             << " dist_goal=" << (goal - core).Length()
+             << " dist_wp=" << XYOnly(target - core).Length()
+             << " dist_goal=" << XYOnly(goal - core).Length()
              << " band_err=" << AvgBandError()
              << " min_dd=" << MinDecoyDistance()
              << " min_od=" << MinObstacleDecoyDistance()
-             << " lambda2_proxy=" << Lambda2()
+             << " lambda2_proxy=" << Lambda2Proxy()
              << std::endl;
       }
    }
