@@ -1,0 +1,26 @@
+# Build files
+build/
+*.dylib
+*.so
+*.o
+CMakeFiles/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Logs / results
+*.csv
+*.log
+btp_argos_metrics.csv
+
+# Python
+.venv/
+__pycache__/
+*.pyc
+
+# macOS
+.DS_Store
+
+# Backup editor files
+*~
+*.bak
