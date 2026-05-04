@@ -24,12 +24,14 @@ struct Agent {
 };
 
 struct BoxObs {
+   std::string id;
    CVector3 center;
    CVector3 half;
    bool dynamic = false;
    CVector3 amp;
    Real freq = 0.0;
    Real phase = 0.0;
+   CPrototypeEntity* visual = nullptr;
 };
 
 class CBTP_LoopFunctions : public CLoopFunctions {
@@ -46,70 +48,66 @@ public:
    std::ofstream csv;
 
    /*
-      Mission setup
+      Larger mission setup
    */
-   Real flight_z = 1.15;
+   Real flight_z = 1.50;
 
-   CVector3 start = CVector3(-3.0, -3.0, 1.15);
-   CVector3 goal  = CVector3( 3.0,  3.0, 1.15);
-
-   /*
-      Protection band
-      Larger ring radius avoids decoy-decoy crowding.
-   */
-   Real rmin  = 0.65;
-   Real rmax  = 1.45;
-   Real rring = 1.12;
-   Real tau   = 0.45;
+   CVector3 start = CVector3(-8.0, -8.0, 1.50);
+   CVector3 goal  = CVector3( 8.0,  8.0, 1.50);
 
    /*
-      Step sizes are position increments per ARGoS tick.
-      Keep these small enough to avoid bouncing.
+      Protection band and ring
    */
-   Real infl_step_max = 0.026;
-   Real dec_step_max  = 0.042;
+   Real rmin  = 0.75;
+   Real rmax  = 1.65;
+   Real rring = 1.25;
+   Real tau   = 0.55;
+
+   /*
+      Step sizes per ARGoS tick
+   */
+   Real infl_step_max = 0.030;
+   Real dec_step_max  = 0.050;
 
    /*
       Influential core gains
    */
-   Real k_goal_core     = 0.050;
+   Real k_goal_core     = 0.060;
    Real k_core_cohesion = 0.012;
    Real k_infl_sep      = 0.014;
-   Real k_obs_infl      = 0.045;
+   Real k_obs_infl      = 0.050;
 
    /*
       Decoy gains
    */
-   Real k_shape   = 0.095;
-   Real k_band    = 0.065;
-   Real k_dec_sep = 0.035;
-   Real k_follow  = 0.025;
-   Real k_tangent = 0.002;
-   Real k_obs_dec = 0.050;
+   Real k_shape   = 0.090;
+   Real k_band    = 0.060;
+   Real k_dec_sep = 0.050;
+   Real k_follow  = 0.030;
+   Real k_tangent = 0.0015;
+   Real k_obs_dec = 0.055;
 
-   Real infl_sep_radius = 0.25;
-   Real dec_sep_radius  = 0.22;
-
-   /*
-      Obstacle SDF parameters
-   */
-   Real obs_safe      = 0.28;
-   Real obs_influence = 1.00;
+   Real infl_sep_radius = 0.30;
+   Real dec_sep_radius  = 0.28;
 
    /*
-      Arena clamp
+      SDF obstacle settings
    */
-   Real xmin = -4.8;
-   Real xmax =  4.8;
-   Real ymin = -4.8;
-   Real ymax =  4.8;
-   Real zmin =  0.70;
-   Real zmax =  2.20;
+   Real obs_safe      = 0.35;
+   Real obs_influence = 1.35;
 
    /*
-      Connectivity proxy graph radius
+      Larger arena clamp
    */
-   Real graph_radius = 1.65;
+   Real xmin = -10.6;
+   Real xmax =  10.6;
+   Real ymin = -10.6;
+   Real ymax =  10.6;
+
+   /*
+      Connectivity proxy radius
+   */
+   Real graph_radius = 1.90;
 
    /*
       Stuck detection
@@ -117,11 +115,25 @@ public:
    Real last_dist_to_wp = 1e9;
    UInt32 stuck_counter = 0;
 
+   /*
+      Criticality normalization
+   */
+   Real initial_goal_dist = 1.0;
+
+   /*
+      Mission completion logic
+      If the influential core enters goal_accept_radius, mission is complete.
+   */
+   Real goal_accept_radius = 1.25;
+   Real wp_accept_radius   = 0.85;
+   bool mission_complete   = false;
+
    void Init(TConfigurationNode&) override {
-      LOG << "BTP 3D sim initialized: waypoint navigation + fixed altitude + ring protection" << std::endl;
+      LOG << "BTP long-path 3D sim initialized: large arena + dense obstacle field + waypoint navigation" << std::endl;
 
       LoadAgents();
       InitObstacles();
+      LinkObstacleVisuals();
       InitWaypoints();
       InitDefinedFormation();
       OpenCSV();
@@ -137,23 +149,49 @@ public:
       current_wp = 0;
       last_dist_to_wp = 1e9;
       stuck_counter = 0;
+      initial_goal_dist = 1.0;
+      mission_complete = false;
 
-      if(csv.is_open()) csv.close();
+      if(csv.is_open()) {
+         csv.close();
+      }
 
       LoadAgents();
       InitObstacles();
+      LinkObstacleVisuals();
       InitWaypoints();
       InitDefinedFormation();
       OpenCSV();
    }
 
    void Destroy() override {
-      if(csv.is_open()) csv.close();
+      if(csv.is_open()) {
+         csv.close();
+      }
    }
 
    void OpenCSV() {
       csv.open("btp_argos_metrics.csv");
-      csv << "step,wp_index,core_x,core_y,core_z,dist_wp,dist_goal,avg_band_error,min_decoy_decoy,min_obstacle_decoy,lambda2_proxy\n";
+
+      csv << "step,"
+          << "wp_index,"
+          << "core_x,"
+          << "core_y,"
+          << "core_z,"
+          << "dist_wp,"
+          << "dist_goal,"
+          << "avg_band_error,"
+          << "min_decoy_decoy,"
+          << "min_obstacle_decoy,"
+          << "lambda2_proxy,"
+          << "protection_score,"
+          << "connectivity_score,"
+          << "obstacle_safety_score,"
+          << "decoy_spacing_score,"
+          << "goal_progress_score,"
+          << "criticality_score,"
+          << "mission_complete"
+          << "\n";
    }
 
    void LoadAgents() {
@@ -197,50 +235,111 @@ public:
       obstacles.clear();
 
       /*
-         These match the visual buildings in test.argos.
+         Ground buildings.
+         These are positioned to create an urban obstacle field,
+         but the waypoint corridor is kept wide enough to avoid choking.
       */
-      obstacles.push_back({CVector3(-1.7, -0.6, 0.8), CVector3(0.45, 0.80, 0.80), false});
-      obstacles.push_back({CVector3( 1.4, -0.3, 0.9), CVector3(0.50, 0.65, 0.90), false});
-      obstacles.push_back({CVector3(-0.8,  1.6, 0.9), CVector3(0.70, 0.45, 0.90), false});
-      obstacles.push_back({CVector3( 2.2,  1.8, 0.8), CVector3(0.45, 0.55, 0.80), false});
+      obstacles.push_back({"bld_0",  CVector3(-6.2, -5.2, 1.1), CVector3(0.6, 0.7, 1.1), false});
+      obstacles.push_back({"bld_1",  CVector3(-3.8, -6.4, 1.0), CVector3(0.55, 0.5, 1.0), false});
+      obstacles.push_back({"bld_2",  CVector3(-1.3, -4.8, 1.4), CVector3(0.7, 0.5, 1.4), false});
+      obstacles.push_back({"bld_3",  CVector3( 1.8, -6.0, 1.2), CVector3(0.6, 0.65, 1.2), false});
+
+      obstacles.push_back({"bld_4",  CVector3(-7.0, -1.5, 1.3), CVector3(0.55, 0.7, 1.3), false});
+      obstacles.push_back({"bld_5",  CVector3(-4.4, -0.6, 1.6), CVector3(0.65, 0.55, 1.6), false});
+      obstacles.push_back({"bld_6",  CVector3(-1.4, -1.8, 1.2), CVector3(0.5, 0.8, 1.2), false});
+      obstacles.push_back({"bld_7",  CVector3( 2.4, -1.2, 1.5), CVector3(0.75, 0.55, 1.5), false});
+
+      obstacles.push_back({"bld_8",  CVector3(-5.8,  2.9, 1.2), CVector3(0.7, 0.55, 1.2), false});
+      obstacles.push_back({"bld_9",  CVector3(-2.8,  3.4, 1.7), CVector3(0.55, 0.8, 1.7), false});
+      obstacles.push_back({"bld_10", CVector3( 0.7,  2.4, 1.3), CVector3(0.6, 0.65, 1.3), false});
+      obstacles.push_back({"bld_11", CVector3( 4.0,  2.8, 1.5), CVector3(0.7, 0.6, 1.5), false});
+
+      obstacles.push_back({"bld_12", CVector3( 2.0,  6.5, 1.2), CVector3(0.6, 0.55, 1.2), false});
+      obstacles.push_back({"bld_13", CVector3( 6.0,  5.6, 1.4), CVector3(0.65, 0.65, 1.4), false});
 
       /*
-         Internal moving aerial obstacles.
-         They are not visualized yet, but the controller avoids them.
+         Small dynamic aerial obstacles.
+         Sizes are intentionally small to avoid blocking corridors fully.
       */
-      obstacles.push_back({CVector3(0.2, 0.8, 1.6), CVector3(0.25, 0.25, 0.25), true,
-                           CVector3(0.80, 0.00, 0.20), 0.035, 0.0});
+      obstacles.push_back({"air_0", CVector3(-5.0, -2.8, 2.2), CVector3(0.30, 0.30, 0.25), true,
+                           CVector3(1.2, 0.0, 0.25), 0.020, 0.0});
 
-      obstacles.push_back({CVector3(1.0, -1.4, 1.5), CVector3(0.30, 0.20, 0.25), true,
-                           CVector3(0.00, 0.80, 0.15), 0.025, 1.2});
+      obstacles.push_back({"air_1", CVector3(-2.3,  0.9, 2.4), CVector3(0.28, 0.28, 0.24), true,
+                           CVector3(0.0, 1.1, 0.20), 0.024, 1.1});
+
+      obstacles.push_back({"air_2", CVector3( 0.5, -3.0, 2.1), CVector3(0.25, 0.25, 0.22), true,
+                           CVector3(1.0, 0.0, 0.18), 0.018, 2.2});
+
+      obstacles.push_back({"air_3", CVector3( 2.5,  1.2, 2.5), CVector3(0.30, 0.30, 0.25), true,
+                           CVector3(0.0, 1.3, 0.25), 0.021, 0.7});
+
+      obstacles.push_back({"air_4", CVector3( 5.2,  3.5, 2.3), CVector3(0.26, 0.26, 0.22), true,
+                           CVector3(1.0, 0.0, 0.20), 0.019, 1.8});
+
+      obstacles.push_back({"air_5", CVector3( 0.0,  6.0, 2.2), CVector3(0.25, 0.25, 0.22), true,
+                           CVector3(0.0, 1.1, 0.20), 0.017, 2.7});
+   }
+
+   void LinkObstacleVisuals() {
+      auto& ents = GetSpace().GetEntitiesByType("prototype");
+
+      for(auto& it : ents) {
+         CPrototypeEntity* e = any_cast<CPrototypeEntity*>(it.second);
+         std::string id = e->GetId();
+
+         for(auto& o : obstacles) {
+            if(o.id == id) {
+               o.visual = e;
+            }
+         }
+      }
    }
 
    void InitWaypoints() {
       waypoints.clear();
 
       /*
-         Safe route around the building cluster.
-         This prevents the classic potential-field local minimum.
+         Long route across the obstacle environment.
+         The route intentionally threads between building clusters,
+         but avoids narrow throat gaps.
       */
-      waypoints.push_back(CVector3(-3.0, -3.0, flight_z));
-      waypoints.push_back(CVector3(-3.3, -0.6, flight_z));
-      waypoints.push_back(CVector3(-2.5,  2.8, flight_z));
-      waypoints.push_back(CVector3( 0.6,  3.4, flight_z));
-      waypoints.push_back(CVector3( 3.0,  3.0, flight_z));
+      waypoints.push_back(CVector3(-8.0, -8.0, flight_z));
+      waypoints.push_back(CVector3(-8.2, -4.2, flight_z));
+      waypoints.push_back(CVector3(-6.7, -2.6, flight_z));
+      waypoints.push_back(CVector3(-6.5,  0.8, flight_z));
+      waypoints.push_back(CVector3(-4.5,  2.0, flight_z));
+      waypoints.push_back(CVector3(-3.2,  5.4, flight_z));
+      waypoints.push_back(CVector3(-0.2,  6.8, flight_z));
+      waypoints.push_back(CVector3( 2.8,  5.2, flight_z));
+      waypoints.push_back(CVector3( 5.0,  6.9, flight_z));
+      waypoints.push_back(CVector3( 8.0,  8.0, flight_z));
 
       current_wp = 1;
-      LOG << "Loaded " << waypoints.size() << " waypoints" << std::endl;
+
+      initial_goal_dist = XYOnly(goal - start).Length();
+      if(initial_goal_dist < 1e-6) {
+         initial_goal_dist = 1.0;
+      mission_complete = false;
+      }
+
+      LOG << "Loaded " << waypoints.size()
+          << " waypoints | initial_goal_dist=" << initial_goal_dist
+          << std::endl;
    }
 
    int CountInfl() const {
       int c = 0;
-      for(const auto& a : agents) if(a.influential) c++;
+      for(const auto& a : agents) {
+         if(a.influential) c++;
+      }
       return c;
    }
 
    int CountDec() const {
       int c = 0;
-      for(const auto& a : agents) if(!a.influential) c++;
+      for(const auto& a : agents) {
+         if(!a.influential) c++;
+      }
       return c;
    }
 
@@ -254,30 +353,26 @@ public:
       return p;
    }
 
-   CVector3 NormalizeSafe(const CVector3& v) const {
-      Real L = v.Length();
-      if(L < 1e-9) return CVector3(0,0,0);
-      return v / L;
-   }
-
    CVector3 NormalizeSafeXY(const CVector3& v) const {
       CVector3 u = v;
       u.SetZ(0.0);
-      Real L = u.Length();
-      if(L < 1e-9) return CVector3(0,0,0);
-      return u / L;
-   }
 
-   CVector3 Limit(const CVector3& v, Real max_mag) const {
-      Real L = v.Length();
-      if(L > max_mag && L > 1e-9) return (v / L) * max_mag;
-      return v;
+      Real L = u.Length();
+      if(L < 1e-9) {
+         return CVector3(0,0,0);
+      }
+
+      return u / L;
    }
 
    CVector3 LimitXY(CVector3 v, Real max_mag) const {
       v.SetZ(0.0);
+
       Real L = v.Length();
-      if(L > max_mag && L > 1e-9) return (v / L) * max_mag;
+      if(L > max_mag && L > 1e-9) {
+         return (v / L) * max_mag;
+      }
+
       return v;
    }
 
@@ -289,7 +384,9 @@ public:
    }
 
    CVector3 ObsCenter(const BoxObs& o) const {
-      if(!o.dynamic) return o.center;
+      if(!o.dynamic) {
+         return o.center;
+      }
 
       Real s = std::sin(o.freq * static_cast<Real>(step) + o.phase);
       return o.center + o.amp * s;
@@ -335,7 +432,7 @@ public:
 
             Real mag = 0.0;
             if(phi <= 0.0) {
-               mag = 2.0;
+               mag = 2.5;
             } else {
                mag = (1.0 / std::max(phi, 1e-4)) - (1.0 / obs_influence);
             }
@@ -356,7 +453,7 @@ public:
 
          if(phi < 0.0) {
             CVector3 n = GradSDFBoxXY(p, o);
-            p += n * (-phi + 0.02);
+            p += n * (-phi + 0.03);
             p.SetZ(flight_z);
          }
       }
@@ -375,29 +472,60 @@ public:
          }
       }
 
-      if(n > 0) c /= n;
+      if(n > 0) {
+         c /= n;
+      }
+
       c.SetZ(flight_z);
       return c;
    }
 
    CVector3 CurrentTarget() const {
-      if(waypoints.empty()) return goal;
+      if(waypoints.empty()) {
+         return goal;
+      }
+
       UInt32 idx = std::min(current_wp, static_cast<UInt32>(waypoints.size() - 1));
       return waypoints[idx];
    }
 
    void UpdateWaypoint() {
-      if(waypoints.empty()) return;
+      if(waypoints.empty()) {
+         return;
+      }
+
+      if(mission_complete) {
+         return;
+      }
 
       CVector3 core = CoreCentroid();
       CVector3 target = CurrentTarget();
 
-      Real dist = (target - core).Length();
+      Real dist = XYOnly(target - core).Length();
+
+      bool final_wp = (current_wp >= waypoints.size() - 1);
+      Real accept_radius = final_wp ? goal_accept_radius : wp_accept_radius;
 
       /*
-         Move to next waypoint when close.
+         If this is the final waypoint and the swarm core enters the goal radius,
+         mark mission complete.
       */
-      if(dist < 0.45 && current_wp < waypoints.size() - 1) {
+      if(final_wp && dist < accept_radius) {
+         mission_complete = true;
+
+         LOG << "MISSION COMPLETE: core entered goal radius. "
+             << "dist_goal=" << dist
+             << " goal_accept_radius=" << goal_accept_radius
+             << std::endl;
+
+         return;
+      }
+
+      /*
+         Intermediate waypoint switch.
+         Larger acceptance radius prevents orbiting/chattering around waypoint.
+      */
+      if(!final_wp && dist < accept_radius) {
          current_wp++;
          last_dist_to_wp = 1e9;
          stuck_counter = 0;
@@ -407,10 +535,11 @@ public:
       }
 
       /*
-         Stuck escape:
-         if distance does not improve for too long, force next waypoint.
+         Stuck detector.
+         If distance does not improve for too long, force the next waypoint.
+         Do not skip the final goal completion condition.
       */
-      if(dist > last_dist_to_wp - 0.003) {
+      if(dist > last_dist_to_wp - 0.004) {
          stuck_counter++;
       } else {
          stuck_counter = 0;
@@ -418,7 +547,7 @@ public:
 
       last_dist_to_wp = dist;
 
-      if(stuck_counter > 350 && current_wp < waypoints.size() - 1) {
+      if(stuck_counter > 450 && !final_wp) {
          current_wp++;
          stuck_counter = 0;
          last_dist_to_wp = 1e9;
@@ -430,10 +559,10 @@ public:
    void InitDefinedFormation() {
       std::vector<CVector3> core_offsets = {
          CVector3( 0.00,  0.00, 0.00),
-         CVector3( 0.20,  0.00, 0.00),
-         CVector3(-0.20,  0.00, 0.00),
-         CVector3( 0.00,  0.20, 0.00),
-         CVector3( 0.00, -0.20, 0.00)
+         CVector3( 0.25,  0.00, 0.00),
+         CVector3(-0.25,  0.00, 0.00),
+         CVector3( 0.00,  0.25, 0.00),
+         CVector3( 0.00, -0.25, 0.00)
       };
 
       int i = 0;
@@ -465,9 +594,11 @@ public:
       }
 
       ApplyMovement();
+      ApplyObstacleVisuals();
+
       initialized = true;
 
-      LOG << "Defined ring formation initialized at fixed altitude z=" << flight_z << std::endl;
+      LOG << "Defined ring formation initialized at z=" << flight_z << std::endl;
    }
 
    CVector3 InfluentialSeparation(const Agent& a) const {
@@ -521,7 +652,9 @@ public:
       CVector3 radial = XYOnly(a.pos - nearest);
       Real d = radial.Length();
 
-      if(d < 1e-6) return CVector3(0.05,0,0);
+      if(d < 1e-6) {
+         return CVector3(0.05,0,0);
+      }
 
       CVector3 u = radial / d;
 
@@ -540,14 +673,16 @@ public:
 
    CVector3 SlotTarget(const Agent& a, const CVector3& core) const {
       int ndec = CountDec();
-      if(ndec <= 0 || a.slot < 0) return core;
+      if(ndec <= 0 || a.slot < 0) {
+         return core;
+      }
 
       Real th0 = 2.0 * ARGOS_PI * static_cast<Real>(a.slot) / ndec;
 
       /*
-         Very slow rotation only; too much rotation causes bouncing.
+         Almost no rotation. This avoids orbiting and crowding at the goal.
       */
-      Real rot = 0.0006 * static_cast<Real>(step);
+      Real rot = 0.00025 * static_cast<Real>(step);
       Real th = th0 + rot;
 
       return SetFlightZ(core + CVector3(
@@ -558,6 +693,15 @@ public:
    }
 
    void UpdateInfluentials() {
+      if(mission_complete) {
+         for(auto& a : agents) {
+            if(a.influential) {
+               a.vel = CVector3(0,0,0);
+            }
+         }
+         return;
+      }
+
       CVector3 core = CoreCentroid();
       CVector3 target = CurrentTarget();
 
@@ -565,7 +709,7 @@ public:
       CVector3 target_dir = NormalizeSafeXY(to_target);
 
       Real dist = to_target.Length();
-      Real slow = std::min(1.0, dist / 1.0);
+      Real slow = std::min(1.0, dist / 1.5);
 
       for(auto& a : agents) {
          if(!a.influential) continue;
@@ -625,8 +769,11 @@ public:
 
          Real err = 0.0;
 
-         if(best < rmin) err = rmin - best;
-         else if(best > rmax) err = best - rmax;
+         if(best < rmin) {
+            err = rmin - best;
+         } else if(best > rmax) {
+            err = best - rmax;
+         }
 
          sum += err;
          count++;
@@ -669,6 +816,7 @@ public:
 
    Real Lambda2Proxy() const {
       const int n = static_cast<int>(agents.size());
+
       if(n < 2) return 0.0;
 
       std::vector<std::vector<int>> A(n, std::vector<int>(n, 0));
@@ -686,6 +834,7 @@ public:
 
       std::vector<int> visited(n, 0);
       std::vector<int> stack;
+
       stack.push_back(0);
       visited[0] = 1;
 
@@ -706,13 +855,64 @@ public:
       }
 
       Real deg_sum = 0.0;
+
       for(int i = 0; i < n; ++i) {
          Real deg = 0.0;
-         for(int j = 0; j < n; ++j) deg += A[i][j];
+
+         for(int j = 0; j < n; ++j) {
+            deg += A[i][j];
+         }
+
          deg_sum += deg;
       }
 
       return deg_sum / static_cast<Real>(n);
+   }
+
+   Real Clamp01(Real x) const {
+      if(x < 0.0) return 0.0;
+      if(x > 1.0) return 1.0;
+      return x;
+   }
+
+   Real ProtectionScore() const {
+      return std::exp(-AvgBandError() / std::max(tau, 1e-6));
+   }
+
+   Real ConnectivityScore() const {
+      return Clamp01(Lambda2Proxy() / 25.0);
+   }
+
+   Real ObstacleSafetyScore() const {
+      return Clamp01(MinObstacleDecoyDistance() / 0.80);
+   }
+
+   Real DecoySpacingScore() const {
+      return Clamp01(MinDecoyDistance() / 0.22);
+   }
+
+   Real GoalProgressScore() const {
+      CVector3 core = CoreCentroid();
+      Real dist_goal = XYOnly(goal - core).Length();
+
+      return Clamp01(1.0 - dist_goal / std::max(initial_goal_dist, 1e-6));
+   }
+
+   Real CriticalityScore() const {
+      Real p_prot = ProtectionScore();
+      Real p_conn = ConnectivityScore();
+      Real p_obs  = ObstacleSafetyScore();
+      Real p_sep  = DecoySpacingScore();
+      Real p_goal = GoalProgressScore();
+
+      Real score =
+         0.35 * p_prot +
+         0.20 * p_conn +
+         0.20 * p_obs  +
+         0.15 * p_sep  +
+         0.10 * p_goal;
+
+      return Clamp01(score);
    }
 
    void ApplyMovement() {
@@ -725,32 +925,70 @@ public:
       }
    }
 
+   void ApplyObstacleVisuals() {
+      CQuaternion q;
+      q.FromEulerAngles(CRadians(0), CRadians(0), CRadians(0));
+
+      for(auto& o : obstacles) {
+         if(o.dynamic && o.visual != nullptr) {
+            CVector3 p = ObsCenter(o);
+            o.visual->GetEmbodiedEntity().MoveTo(p, q, false);
+         }
+      }
+   }
+
    void PostStep() override {
       step++;
 
-      if(!initialized) InitDefinedFormation();
+      if(!initialized) {
+         InitDefinedFormation();
+      }
 
       UpdateWaypoint();
 
       UpdateInfluentials();
       UpdateDecoys();
+
       ApplyMovement();
+      ApplyObstacleVisuals();
 
       if(csv.is_open() && step % 5 == 0) {
          CVector3 core = CoreCentroid();
          CVector3 target = CurrentTarget();
+
+         Real dist_wp   = XYOnly(target - core).Length();
+         Real dist_goal = XYOnly(goal - core).Length();
+
+         Real band_err = AvgBandError();
+         Real min_dd   = MinDecoyDistance();
+         Real min_od   = MinObstacleDecoyDistance();
+         Real lambda2  = Lambda2Proxy();
+
+         Real p_prot = ProtectionScore();
+         Real p_conn = ConnectivityScore();
+         Real p_obs  = ObstacleSafetyScore();
+         Real p_sep  = DecoySpacingScore();
+         Real p_goal = GoalProgressScore();
+         Real crit   = CriticalityScore();
 
          csv << step << ","
              << current_wp << ","
              << core.GetX() << ","
              << core.GetY() << ","
              << core.GetZ() << ","
-             << XYOnly(target - core).Length() << ","
-             << XYOnly(goal - core).Length() << ","
-             << AvgBandError() << ","
-             << MinDecoyDistance() << ","
-             << MinObstacleDecoyDistance() << ","
-             << Lambda2Proxy()
+             << dist_wp << ","
+             << dist_goal << ","
+             << band_err << ","
+             << min_dd << ","
+             << min_od << ","
+             << lambda2 << ","
+             << p_prot << ","
+             << p_conn << ","
+             << p_obs << ","
+             << p_sep << ","
+             << p_goal << ","
+             << crit << ","
+             << (mission_complete ? 1 : 0)
              << "\n";
       }
 
@@ -758,15 +996,37 @@ public:
          CVector3 core = CoreCentroid();
          CVector3 target = CurrentTarget();
 
+         Real dist_wp   = XYOnly(target - core).Length();
+         Real dist_goal = XYOnly(goal - core).Length();
+
+         Real band_err = AvgBandError();
+         Real min_dd   = MinDecoyDistance();
+         Real min_od   = MinObstacleDecoyDistance();
+         Real lambda2  = Lambda2Proxy();
+
+         Real p_prot = ProtectionScore();
+         Real p_conn = ConnectivityScore();
+         Real p_obs  = ObstacleSafetyScore();
+         Real p_sep  = DecoySpacingScore();
+         Real p_goal = GoalProgressScore();
+         Real crit   = CriticalityScore();
+
          LOG << "[t=" << step << "]"
              << " wp=" << current_wp
              << " core=(" << core.GetX() << "," << core.GetY() << "," << core.GetZ() << ")"
-             << " dist_wp=" << XYOnly(target - core).Length()
-             << " dist_goal=" << XYOnly(goal - core).Length()
-             << " band_err=" << AvgBandError()
-             << " min_dd=" << MinDecoyDistance()
-             << " min_od=" << MinObstacleDecoyDistance()
-             << " lambda2_proxy=" << Lambda2Proxy()
+             << " dist_wp=" << dist_wp
+             << " dist_goal=" << dist_goal
+             << " band_err=" << band_err
+             << " min_dd=" << min_dd
+             << " min_od=" << min_od
+             << " lambda2_proxy=" << lambda2
+             << " prot=" << p_prot
+             << " conn=" << p_conn
+             << " obs_safe=" << p_obs
+             << " sep_safe=" << p_sep
+             << " goal_prog=" << p_goal
+             << " criticality=" << crit
+             << " mission_complete=" << (mission_complete ? 1 : 0)
              << std::endl;
       }
    }
