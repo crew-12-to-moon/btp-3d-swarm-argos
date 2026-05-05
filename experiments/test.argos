@@ -28,463 +28,330 @@
 
   <loop_functions library="/Users/harshvardhanmohite/btp_3d_fresh/build/libbtp_loop.dylib" label="loop"/>
 
-  <arena size="22,22,5" center="0,0,2.5">
+  <arena size="18,18,5" center="0,0,2.5">
 
-    <!-- No floor: avoids ARGoS floor/source XML issue -->
+    <!-- Reduced building obstacle environment: 6 buildings + 3 small aerial obstacles -->
+    <!-- No floor: avoids ARGoS floor/source XML issues -->
 
-    <!-- Ground building obstacles -->
     <prototype id="bld_0" movable="false">
-      <body position="-6.200,-5.200,1.100"/>
+      <body position="-4.800,-4.000,1.100"/>
       <links ref="b">
         <link id="b" geometry="box" mass="10.0" size="1.200,1.400,2.200"/>
       </links>
     </prototype>
+
     <prototype id="bld_1" movable="false">
-      <body position="-3.800,-6.400,1.000"/>
+      <body position="-1.300,-4.500,1.200"/>
       <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.100,1.000,2.000"/>
-      </links>
-    </prototype>
-    <prototype id="bld_2" movable="false">
-      <body position="-1.300,-4.800,1.400"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.400,1.000,2.800"/>
-      </links>
-    </prototype>
-    <prototype id="bld_3" movable="false">
-      <body position="1.800,-6.000,1.200"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.200,1.300,2.400"/>
-      </links>
-    </prototype>
-    <prototype id="bld_4" movable="false">
-      <body position="-7.000,-1.500,1.300"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.100,1.400,2.600"/>
-      </links>
-    </prototype>
-    <prototype id="bld_5" movable="false">
-      <body position="-4.400,-0.600,1.600"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.300,1.100,3.200"/>
-      </links>
-    </prototype>
-    <prototype id="bld_6" movable="false">
-      <body position="-1.400,-1.800,1.200"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.000,1.600,2.400"/>
-      </links>
-    </prototype>
-    <prototype id="bld_7" movable="false">
-      <body position="2.400,-1.200,1.500"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.500,1.100,3.000"/>
-      </links>
-    </prototype>
-    <prototype id="bld_8" movable="false">
-      <body position="-5.800,2.900,1.200"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.400,1.100,2.400"/>
-      </links>
-    </prototype>
-    <prototype id="bld_9" movable="false">
-      <body position="-2.800,3.400,1.700"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.100,1.600,3.400"/>
-      </links>
-    </prototype>
-    <prototype id="bld_10" movable="false">
-      <body position="0.700,2.400,1.300"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.200,1.300,2.600"/>
-      </links>
-    </prototype>
-    <prototype id="bld_11" movable="false">
-      <body position="4.000,2.800,1.500"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.400,1.200,3.000"/>
-      </links>
-    </prototype>
-    <prototype id="bld_12" movable="false">
-      <body position="2.000,6.500,1.200"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.200,1.100,2.400"/>
-      </links>
-    </prototype>
-    <prototype id="bld_13" movable="false">
-      <body position="6.000,5.600,1.400"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="10.0" size="1.300,1.300,2.800"/>
+        <link id="b" geometry="box" mass="10.0" size="1.300,1.100,2.400"/>
       </links>
     </prototype>
 
-    <!-- Small moving aerial obstacles. Their motion is controlled from loop_functions. -->
+    <prototype id="bld_2" movable="false">
+      <body position="-5.200,0.000,1.300"/>
+      <links ref="b">
+        <link id="b" geometry="box" mass="10.0" size="1.200,1.500,2.600"/>
+      </links>
+    </prototype>
+
+    <prototype id="bld_3" movable="false">
+      <body position="-1.500,1.200,1.400"/>
+      <links ref="b">
+        <link id="b" geometry="box" mass="10.0" size="1.500,1.100,2.800"/>
+      </links>
+    </prototype>
+
+    <prototype id="bld_4" movable="false">
+      <body position="2.300,0.000,1.300"/>
+      <links ref="b">
+        <link id="b" geometry="box" mass="10.0" size="1.400,1.200,2.600"/>
+      </links>
+    </prototype>
+
+    <prototype id="bld_5" movable="false">
+      <body position="4.800,4.200,1.200"/>
+      <links ref="b">
+        <link id="b" geometry="box" mass="10.0" size="1.300,1.400,2.400"/>
+      </links>
+    </prototype>
+
+    <!-- Small moving aerial obstacles; motion controlled by loop_functions.cpp -->
+
     <prototype id="air_0" movable="true">
-      <body position="-5.000,-2.800,2.200"/>
+      <body position="-3.500,-1.500,2.250"/>
       <links ref="b">
-        <link id="b" geometry="box" mass="0.3" size="0.300,0.300,0.250"/>
+        <link id="b" geometry="box" mass="0.3" size="0.280,0.280,0.220"/>
       </links>
     </prototype>
+
     <prototype id="air_1" movable="true">
-      <body position="-2.300,0.900,2.400"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="0.3" size="0.280,0.280,0.240"/>
-      </links>
-    </prototype>
-    <prototype id="air_2" movable="true">
-      <body position="0.500,-3.000,2.100"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="0.3" size="0.250,0.250,0.220"/>
-      </links>
-    </prototype>
-    <prototype id="air_3" movable="true">
-      <body position="2.500,1.200,2.500"/>
-      <links ref="b">
-        <link id="b" geometry="box" mass="0.3" size="0.300,0.300,0.250"/>
-      </links>
-    </prototype>
-    <prototype id="air_4" movable="true">
-      <body position="5.200,3.500,2.300"/>
+      <body position="0.800,2.800,2.350"/>
       <links ref="b">
         <link id="b" geometry="box" mass="0.3" size="0.260,0.260,0.220"/>
       </links>
     </prototype>
-    <prototype id="air_5" movable="true">
-      <body position="0.000,6.000,2.200"/>
+
+    <prototype id="air_2" movable="true">
+      <body position="4.000,1.200,2.200"/>
       <links ref="b">
-        <link id="b" geometry="box" mass="0.3" size="0.250,0.250,0.220"/>
+        <link id="b" geometry="box" mass="0.3" size="0.250,0.250,0.200"/>
       </links>
     </prototype>
 
-    <!-- Start marker -->
+    <!-- Start and goal markers -->
+
     <prototype id="start_marker" movable="false">
-      <body position="-8.000,-8.000,0.250"/>
+      <body position="-7.000,-7.000,0.250"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.1" radius="0.180"/>
       </links>
     </prototype>
 
-    <!-- Goal marker -->
     <prototype id="goal_marker" movable="false">
-      <body position="8.000,8.000,0.250"/>
+      <body position="7.000,7.000,0.250"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.1" radius="0.180"/>
       </links>
     </prototype>
 
-    <!-- Influential core -->
+    <!-- Influential agents: 4 / 30 = 13.33 percent of swarm -->
+
     <prototype id="infl_0" movable="true">
-      <body position="-8.000,-8.000,1.500"/>
+      <body position="-7.000,-7.000,1.500"/>
       <controller config="infl"/>
       <links ref="b">
-        <link id="b" geometry="sphere" mass="0.15" radius="0.060"/>
-      </links>
-    </prototype>
-    <prototype id="infl_1" movable="true">
-      <body position="-7.750,-8.000,1.500"/>
-      <controller config="infl"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.15" radius="0.060"/>
-      </links>
-    </prototype>
-    <prototype id="infl_2" movable="true">
-      <body position="-8.250,-8.000,1.500"/>
-      <controller config="infl"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.15" radius="0.060"/>
-      </links>
-    </prototype>
-    <prototype id="infl_3" movable="true">
-      <body position="-8.000,-7.750,1.500"/>
-      <controller config="infl"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.15" radius="0.060"/>
-      </links>
-    </prototype>
-    <prototype id="infl_4" movable="true">
-      <body position="-8.000,-8.250,1.500"/>
-      <controller config="infl"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.15" radius="0.060"/>
+        <link id="b" geometry="sphere" mass="0.15" radius="0.065"/>
       </links>
     </prototype>
 
-    <!-- 40 decoys in protection ring -->
+    <prototype id="infl_1" movable="true">
+      <body position="-6.720,-7.000,1.500"/>
+      <controller config="infl"/>
+      <links ref="b">
+        <link id="b" geometry="sphere" mass="0.15" radius="0.065"/>
+      </links>
+    </prototype>
+
+    <prototype id="infl_2" movable="true">
+      <body position="-7.280,-7.000,1.500"/>
+      <controller config="infl"/>
+      <links ref="b">
+        <link id="b" geometry="sphere" mass="0.15" radius="0.065"/>
+      </links>
+    </prototype>
+
+    <prototype id="infl_3" movable="true">
+      <body position="-7.000,-6.720,1.500"/>
+      <controller config="infl"/>
+      <links ref="b">
+        <link id="b" geometry="sphere" mass="0.15" radius="0.065"/>
+      </links>
+    </prototype>
+
+    <!-- Decoy agents: 26 / 30 = 86.67 percent of swarm -->
+
     <prototype id="dec_0" movable="true">
-      <body position="-6.750,-8.000,1.500"/>
+      <body position="-5.650,-7.000,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_1" movable="true">
-      <body position="-6.765,-7.804,1.500"/>
+      <body position="-5.689,-6.677,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_2" movable="true">
-      <body position="-6.811,-7.614,1.500"/>
+      <body position="-5.805,-6.373,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_3" movable="true">
-      <body position="-6.886,-7.433,1.500"/>
+      <body position="-5.990,-6.105,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_4" movable="true">
-      <body position="-6.989,-7.265,1.500"/>
+      <body position="-6.233,-5.889,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_5" movable="true">
-      <body position="-7.116,-7.116,1.500"/>
+      <body position="-6.521,-5.738,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_6" movable="true">
-      <body position="-7.265,-6.989,1.500"/>
+      <body position="-6.837,-5.660,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_7" movable="true">
-      <body position="-7.433,-6.886,1.500"/>
+      <body position="-7.163,-5.660,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_8" movable="true">
-      <body position="-7.614,-6.811,1.500"/>
+      <body position="-7.479,-5.738,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_9" movable="true">
-      <body position="-7.804,-6.765,1.500"/>
+      <body position="-7.767,-5.889,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_10" movable="true">
-      <body position="-8.000,-6.750,1.500"/>
+      <body position="-8.010,-6.105,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_11" movable="true">
-      <body position="-8.196,-6.765,1.500"/>
+      <body position="-8.195,-6.373,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_12" movable="true">
-      <body position="-8.386,-6.811,1.500"/>
+      <body position="-8.311,-6.677,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_13" movable="true">
-      <body position="-8.567,-6.886,1.500"/>
+      <body position="-8.350,-7.000,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_14" movable="true">
-      <body position="-8.735,-6.989,1.500"/>
+      <body position="-8.311,-7.323,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_15" movable="true">
-      <body position="-8.884,-7.116,1.500"/>
+      <body position="-8.195,-7.627,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_16" movable="true">
-      <body position="-9.011,-7.265,1.500"/>
+      <body position="-8.010,-7.895,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_17" movable="true">
-      <body position="-9.114,-7.433,1.500"/>
+      <body position="-7.767,-8.111,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_18" movable="true">
-      <body position="-9.189,-7.614,1.500"/>
+      <body position="-7.479,-8.262,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_19" movable="true">
-      <body position="-9.235,-7.804,1.500"/>
+      <body position="-7.163,-8.340,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_20" movable="true">
-      <body position="-9.250,-8.000,1.500"/>
+      <body position="-6.837,-8.340,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_21" movable="true">
-      <body position="-9.235,-8.196,1.500"/>
+      <body position="-6.521,-8.262,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_22" movable="true">
-      <body position="-9.189,-8.386,1.500"/>
+      <body position="-6.233,-8.111,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_23" movable="true">
-      <body position="-9.114,-8.567,1.500"/>
+      <body position="-5.990,-7.895,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_24" movable="true">
-      <body position="-9.011,-8.735,1.500"/>
+      <body position="-5.805,-7.627,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
       </links>
     </prototype>
+
     <prototype id="dec_25" movable="true">
-      <body position="-8.884,-8.884,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_26" movable="true">
-      <body position="-8.735,-9.011,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_27" movable="true">
-      <body position="-8.567,-9.114,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_28" movable="true">
-      <body position="-8.386,-9.189,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_29" movable="true">
-      <body position="-8.196,-9.235,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_30" movable="true">
-      <body position="-8.000,-9.250,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_31" movable="true">
-      <body position="-7.804,-9.235,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_32" movable="true">
-      <body position="-7.614,-9.189,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_33" movable="true">
-      <body position="-7.433,-9.114,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_34" movable="true">
-      <body position="-7.265,-9.011,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_35" movable="true">
-      <body position="-7.116,-8.884,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_36" movable="true">
-      <body position="-6.989,-8.735,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_37" movable="true">
-      <body position="-6.886,-8.567,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_38" movable="true">
-      <body position="-6.811,-8.386,1.500"/>
-      <controller config="dec"/>
-      <links ref="b">
-        <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
-      </links>
-    </prototype>
-    <prototype id="dec_39" movable="true">
-      <body position="-6.765,-8.196,1.500"/>
+      <body position="-5.689,-7.323,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -496,7 +363,7 @@
   <visualization>
     <qt-opengl>
       <camera>
-        <placement position="0,-18,14" look_at="0,0,1.5"/>
+        <placement position="0,-15,12" look_at="0,0,1.5"/>
       </camera>
     </qt-opengl>
   </visualization>

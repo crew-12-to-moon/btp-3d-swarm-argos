@@ -11,8 +11,18 @@
 #include <algorithm>
 #include <fstream>
 #include <limits>
+#include <cstdlib>
 
 using namespace argos;
+
+struct Chromosome {
+   Real s      = 0.045;
+   Real wcent  = 0.70;
+   Real wsep   = 2.20;
+   Real wband  = 2.80;
+   Real wobs   = 1.60;
+   Real fitness = -1e9;
+};
 
 struct Agent {
    std::string id;
@@ -21,6 +31,9 @@ struct Agent {
    CVector3 vel;
    bool influential = false;
    int slot = -1;
+
+   Chromosome active;
+   std::vector<Chromosome> population;
 };
 
 struct BoxObs {
@@ -48,66 +61,65 @@ public:
    std::ofstream csv;
 
    /*
-      Larger mission setup
+      30-swarm setup:
+      4 influentials + 26 decoys = 30 total
+      Influential fraction = 13.33%
    */
    Real flight_z = 1.50;
 
-   CVector3 start = CVector3(-8.0, -8.0, 1.50);
-   CVector3 goal  = CVector3( 8.0,  8.0, 1.50);
+   CVector3 start = CVector3(-7.0, -7.0, 1.50);
+   CVector3 goal  = CVector3( 7.0,  7.0, 1.50);
+
+   Real goal_accept_radius = 1.35;
+   Real wp_accept_radius   = 0.95;
+   bool mission_complete   = false;
 
    /*
-      Protection band and ring
+      Protection band
    */
-   Real rmin  = 0.75;
-   Real rmax  = 1.65;
-   Real rring = 1.25;
-   Real tau   = 0.55;
+   Real rmin  = 0.85;
+   Real rmax  = 1.85;
+   Real rring = 1.35;
+   Real tau   = 0.60;
 
    /*
-      Step sizes per ARGoS tick
+      Influential motion
    */
-   Real infl_step_max = 0.030;
-   Real dec_step_max  = 0.050;
+   Real infl_step_max = 0.034;
 
-   /*
-      Influential core gains
-   */
-   Real k_goal_core     = 0.060;
+   Real k_goal_core     = 0.065;
    Real k_core_cohesion = 0.012;
    Real k_infl_sep      = 0.014;
    Real k_obs_infl      = 0.050;
 
    /*
-      Decoy gains
+      Stabilization gains
+      Slot bias is intentionally strong so decoys remain in a protective ring.
    */
-   Real k_shape   = 0.090;
-   Real k_band    = 0.060;
-   Real k_dec_sep = 0.050;
-   Real k_follow  = 0.030;
-   Real k_tangent = 0.0015;
-   Real k_obs_dec = 0.055;
+   Real k_slot_bias = 0.090;
+   Real k_tangent   = 0.0005;
 
    Real infl_sep_radius = 0.30;
-   Real dec_sep_radius  = 0.28;
+   Real dec_sep_radius  = 0.32;
 
    /*
-      SDF obstacle settings
+      Obstacle SDF settings
    */
    Real obs_safe      = 0.35;
    Real obs_influence = 1.35;
 
    /*
-      Larger arena clamp
+      Arena clamp for 18 x 18 arena
    */
-   Real xmin = -10.6;
-   Real xmax =  10.6;
-   Real ymin = -10.6;
-   Real ymax =  10.6;
+   Real xmin = -8.7;
+   Real xmax =  8.7;
+   Real ymin = -8.7;
+   Real ymax =  8.7;
 
    /*
-      Connectivity proxy radius
+      Connectivity radius
    */
-   Real graph_radius = 1.90;
+   Real graph_radius = 2.05;
 
    /*
       Stuck detection
@@ -116,25 +128,50 @@ public:
    UInt32 stuck_counter = 0;
 
    /*
-      Criticality normalization
+      Mission progress
    */
    Real initial_goal_dist = 1.0;
 
    /*
-      Mission completion logic
-      If the influential core enters goal_accept_radius, mission is complete.
+      Stable lightweight decentralized GA-MPC.
+      GA is now a fine tuner, not the dominant ring controller.
    */
-   Real goal_accept_radius = 1.25;
-   Real wp_accept_radius   = 0.85;
-   bool mission_complete   = false;
+   UInt32 replan_period = 80;
+   UInt32 horizon = 4;
+   UInt32 population_size = 4;
+
+   Real fit_prot   = 1.25;
+   Real fit_struct = 0.60;
+   Real fit_obs    = 3.20;
+   Real fit_move   = 0.35;
+   Real fit_conn   = 0.45;
+   Real fit_slot   = 1.10;
+
+   Real mutation_rate = 0.30;
+   Real mutation_scale = 0.16;
+
+   UInt32 csv_log_period = 25;
+   UInt32 terminal_log_period = 100;
+
+   /*
+      Mission completion thresholds.
+      Mission is complete only if the core reaches the goal AND swarm quality is acceptable.
+   */
+   Real complete_min_lambda2_proxy = 0.1;
+   Real complete_min_decoy_dist    = 0.12;
+   Real complete_min_obs_dist      = 0.0;
+   Real complete_min_protection    = 0.45;
 
    void Init(TConfigurationNode&) override {
-      LOG << "BTP long-path 3D sim initialized: large arena + dense obstacle field + waypoint navigation" << std::endl;
+      LOG << "BTP ARGoS STABLE-GA initialized: 30 swarm, strong protection ring, connectivity rescue" << std::endl;
+
+      std::srand(7);
 
       LoadAgents();
       InitObstacles();
       LinkObstacleVisuals();
       InitWaypoints();
+      InitDecoyPopulations();
       InitDefinedFormation();
       OpenCSV();
    }
@@ -156,10 +193,13 @@ public:
          csv.close();
       }
 
+      std::srand(7);
+
       LoadAgents();
       InitObstacles();
       LinkObstacleVisuals();
       InitWaypoints();
+      InitDecoyPopulations();
       InitDefinedFormation();
       OpenCSV();
    }
@@ -184,10 +224,21 @@ public:
           << "min_decoy_decoy,"
           << "min_obstacle_decoy,"
           << "lambda2_proxy,"
-          << "protection_score,"
-          << "connectivity_score,"
-          << "obstacle_safety_score,"
-          << "decoy_spacing_score,"
+          << "protection_infl_mean,"
+          << "protection_decoy_mean,"
+          << "struct_infl_mean,"
+          << "struct_decoy_mean,"
+          << "combined_infl_mean,"
+          << "combined_decoy_mean,"
+          << "margin_prot_mean,"
+          << "margin_prot_robust,"
+          << "margin_prot_worst,"
+          << "margin_struct_mean,"
+          << "margin_struct_robust,"
+          << "margin_struct_worst,"
+          << "margin_combined_mean,"
+          << "margin_combined_robust,"
+          << "margin_combined_worst,"
           << "goal_progress_score,"
           << "criticality_score,"
           << "mission_complete"
@@ -235,49 +286,28 @@ public:
       obstacles.clear();
 
       /*
-         Ground buildings.
-         These are positioned to create an urban obstacle field,
-         but the waypoint corridor is kept wide enough to avoid choking.
+         Reduced obstacle environment for 30-agent swarm.
+         6 ground buildings + 3 small dynamic aerial obstacles.
+         Waypoints use wide corridors to avoid choke points.
       */
-      obstacles.push_back({"bld_0",  CVector3(-6.2, -5.2, 1.1), CVector3(0.6, 0.7, 1.1), false});
-      obstacles.push_back({"bld_1",  CVector3(-3.8, -6.4, 1.0), CVector3(0.55, 0.5, 1.0), false});
-      obstacles.push_back({"bld_2",  CVector3(-1.3, -4.8, 1.4), CVector3(0.7, 0.5, 1.4), false});
-      obstacles.push_back({"bld_3",  CVector3( 1.8, -6.0, 1.2), CVector3(0.6, 0.65, 1.2), false});
-
-      obstacles.push_back({"bld_4",  CVector3(-7.0, -1.5, 1.3), CVector3(0.55, 0.7, 1.3), false});
-      obstacles.push_back({"bld_5",  CVector3(-4.4, -0.6, 1.6), CVector3(0.65, 0.55, 1.6), false});
-      obstacles.push_back({"bld_6",  CVector3(-1.4, -1.8, 1.2), CVector3(0.5, 0.8, 1.2), false});
-      obstacles.push_back({"bld_7",  CVector3( 2.4, -1.2, 1.5), CVector3(0.75, 0.55, 1.5), false});
-
-      obstacles.push_back({"bld_8",  CVector3(-5.8,  2.9, 1.2), CVector3(0.7, 0.55, 1.2), false});
-      obstacles.push_back({"bld_9",  CVector3(-2.8,  3.4, 1.7), CVector3(0.55, 0.8, 1.7), false});
-      obstacles.push_back({"bld_10", CVector3( 0.7,  2.4, 1.3), CVector3(0.6, 0.65, 1.3), false});
-      obstacles.push_back({"bld_11", CVector3( 4.0,  2.8, 1.5), CVector3(0.7, 0.6, 1.5), false});
-
-      obstacles.push_back({"bld_12", CVector3( 2.0,  6.5, 1.2), CVector3(0.6, 0.55, 1.2), false});
-      obstacles.push_back({"bld_13", CVector3( 6.0,  5.6, 1.4), CVector3(0.65, 0.65, 1.4), false});
+      obstacles.push_back({"bld_0",  CVector3(-4.800, -4.000, 1.100), CVector3(0.600, 0.700, 1.100), false});
+      obstacles.push_back({"bld_1",  CVector3(-1.300, -4.500, 1.200), CVector3(0.650, 0.550, 1.200), false});
+      obstacles.push_back({"bld_2",  CVector3(-5.200,  0.000, 1.300), CVector3(0.600, 0.750, 1.300), false});
+      obstacles.push_back({"bld_3",  CVector3(-1.500,  1.200, 1.400), CVector3(0.750, 0.550, 1.400), false});
+      obstacles.push_back({"bld_4",  CVector3( 2.300,  0.000, 1.300), CVector3(0.700, 0.600, 1.300), false});
+      obstacles.push_back({"bld_5",  CVector3( 4.800,  4.200, 1.200), CVector3(0.650, 0.700, 1.200), false});
 
       /*
          Small dynamic aerial obstacles.
-         Sizes are intentionally small to avoid blocking corridors fully.
       */
-      obstacles.push_back({"air_0", CVector3(-5.0, -2.8, 2.2), CVector3(0.30, 0.30, 0.25), true,
-                           CVector3(1.2, 0.0, 0.25), 0.020, 0.0});
+      obstacles.push_back({"air_0", CVector3(-3.500, -1.500, 2.250), CVector3(0.140, 0.140, 0.110), true,
+                           CVector3(1.000, 0.000, 0.180), 0.020, 0.000});
 
-      obstacles.push_back({"air_1", CVector3(-2.3,  0.9, 2.4), CVector3(0.28, 0.28, 0.24), true,
-                           CVector3(0.0, 1.1, 0.20), 0.024, 1.1});
+      obstacles.push_back({"air_1", CVector3( 0.800,  2.800, 2.350), CVector3(0.130, 0.130, 0.110), true,
+                           CVector3(0.000, 1.000, 0.180), 0.022, 1.100});
 
-      obstacles.push_back({"air_2", CVector3( 0.5, -3.0, 2.1), CVector3(0.25, 0.25, 0.22), true,
-                           CVector3(1.0, 0.0, 0.18), 0.018, 2.2});
-
-      obstacles.push_back({"air_3", CVector3( 2.5,  1.2, 2.5), CVector3(0.30, 0.30, 0.25), true,
-                           CVector3(0.0, 1.3, 0.25), 0.021, 0.7});
-
-      obstacles.push_back({"air_4", CVector3( 5.2,  3.5, 2.3), CVector3(0.26, 0.26, 0.22), true,
-                           CVector3(1.0, 0.0, 0.20), 0.019, 1.8});
-
-      obstacles.push_back({"air_5", CVector3( 0.0,  6.0, 2.2), CVector3(0.25, 0.25, 0.22), true,
-                           CVector3(0.0, 1.1, 0.20), 0.017, 2.7});
+      obstacles.push_back({"air_2", CVector3( 4.000,  1.200, 2.200), CVector3(0.125, 0.125, 0.100), true,
+                           CVector3(0.900, 0.000, 0.150), 0.018, 2.200});
    }
 
    void LinkObstacleVisuals() {
@@ -299,32 +329,103 @@ public:
       waypoints.clear();
 
       /*
-         Long route across the obstacle environment.
-         The route intentionally threads between building clusters,
-         but avoids narrow throat gaps.
+         Long route through reduced obstacle field.
+         Waypoints are placed in wide corridors.
       */
-      waypoints.push_back(CVector3(-8.0, -8.0, flight_z));
-      waypoints.push_back(CVector3(-8.2, -4.2, flight_z));
-      waypoints.push_back(CVector3(-6.7, -2.6, flight_z));
-      waypoints.push_back(CVector3(-6.5,  0.8, flight_z));
-      waypoints.push_back(CVector3(-4.5,  2.0, flight_z));
-      waypoints.push_back(CVector3(-3.2,  5.4, flight_z));
-      waypoints.push_back(CVector3(-0.2,  6.8, flight_z));
-      waypoints.push_back(CVector3( 2.8,  5.2, flight_z));
-      waypoints.push_back(CVector3( 5.0,  6.9, flight_z));
-      waypoints.push_back(CVector3( 8.0,  8.0, flight_z));
+      waypoints.push_back(CVector3(-7.000, -7.000, 1.500));
+      waypoints.push_back(CVector3(-6.800, -3.000, 1.500));
+      waypoints.push_back(CVector3(-4.000, -1.200, 1.500));
+      waypoints.push_back(CVector3(-4.200,  2.800, 1.500));
+      waypoints.push_back(CVector3(-1.000,  4.500, 1.500));
+      waypoints.push_back(CVector3( 2.500,  3.200, 1.500));
+      waypoints.push_back(CVector3( 5.000,  5.500, 1.500));
+      waypoints.push_back(CVector3( 7.000,  7.000, 1.500));
 
       current_wp = 1;
 
       initial_goal_dist = XYOnly(goal - start).Length();
       if(initial_goal_dist < 1e-6) {
          initial_goal_dist = 1.0;
-      mission_complete = false;
       }
 
       LOG << "Loaded " << waypoints.size()
           << " waypoints | initial_goal_dist=" << initial_goal_dist
           << std::endl;
+   }
+
+   Real Rand01() const {
+      return static_cast<Real>(std::rand()) / static_cast<Real>(RAND_MAX);
+   }
+
+   Real RandRange(Real a, Real b) const {
+      return a + (b - a) * Rand01();
+   }
+
+   Chromosome RandomChromosome() const {
+      Chromosome c;
+
+      /*
+         Reduced speed range prevents decoys from overshooting / clustering.
+      */
+      c.s     = RandRange(0.020, 0.055);
+      c.wcent = RandRange(0.20, 1.00);
+      c.wsep  = RandRange(1.60, 4.20);
+      c.wband = RandRange(1.60, 4.00);
+      c.wobs  = RandRange(1.10, 3.20);
+      c.fitness = -1e9;
+
+      return c;
+   }
+
+   Chromosome MutateChromosome(Chromosome c) const {
+      auto mutate_scalar = [&](Real x, Real lo, Real hi) {
+         if(Rand01() < mutation_rate) {
+            Real scale = 1.0 + mutation_scale * RandRange(-1.0, 1.0);
+            x *= scale;
+         }
+
+         if(x < lo) x = lo;
+         if(x > hi) x = hi;
+         return x;
+      };
+
+      c.s     = mutate_scalar(c.s,     0.018, 0.060);
+      c.wcent = mutate_scalar(c.wcent, 0.100, 1.300);
+      c.wsep  = mutate_scalar(c.wsep,  1.000, 5.000);
+      c.wband = mutate_scalar(c.wband, 1.000, 5.000);
+      c.wobs  = mutate_scalar(c.wobs,  0.700, 4.000);
+      c.fitness = -1e9;
+
+      return c;
+   }
+
+   Chromosome Crossover(const Chromosome& a, const Chromosome& b) const {
+      Chromosome c;
+      c.s     = (Rand01() < 0.5) ? a.s     : b.s;
+      c.wcent = (Rand01() < 0.5) ? a.wcent : b.wcent;
+      c.wsep  = (Rand01() < 0.5) ? a.wsep  : b.wsep;
+      c.wband = (Rand01() < 0.5) ? a.wband : b.wband;
+      c.wobs  = (Rand01() < 0.5) ? a.wobs  : b.wobs;
+      c.fitness = -1e9;
+      return c;
+   }
+
+   void InitDecoyPopulations() {
+      for(auto& a : agents) {
+         if(a.influential) {
+            continue;
+         }
+
+         a.population.clear();
+
+         for(UInt32 i = 0; i < population_size; ++i) {
+            a.population.push_back(RandomChromosome());
+         }
+
+         if(!a.population.empty()) {
+            a.active = a.population[0];
+         }
+      }
    }
 
    int CountInfl() const {
@@ -485,7 +586,7 @@ public:
          return goal;
       }
 
-      UInt32 idx = std::min(current_wp, static_cast<UInt32>(waypoints.size() - 1));
+      size_t idx = std::min(static_cast<size_t>(current_wp), waypoints.size() - 1);
       return waypoints[idx];
    }
 
@@ -502,29 +603,29 @@ public:
       CVector3 target = CurrentTarget();
 
       Real dist = XYOnly(target - core).Length();
-
       bool final_wp = (current_wp >= waypoints.size() - 1);
       Real accept_radius = final_wp ? goal_accept_radius : wp_accept_radius;
 
       /*
-         If this is the final waypoint and the swarm core enters the goal radius,
-         mark mission complete.
+         Final mission completion requires the core to enter the goal radius
+         AND swarm protection/connection/safety to be acceptable.
       */
       if(final_wp && dist < accept_radius) {
-         mission_complete = true;
+         if(IsMissionSafeToComplete()) {
+            mission_complete = true;
 
-         LOG << "MISSION COMPLETE: core entered goal radius. "
-             << "dist_goal=" << dist
-             << " goal_accept_radius=" << goal_accept_radius
-             << std::endl;
+            LOG << "MISSION COMPLETE: core reached goal and swarm quality is valid. "
+                << "dist_goal=" << dist
+                << " goal_accept_radius=" << goal_accept_radius
+                << std::endl;
+         } else if(step % terminal_log_period == 0) {
+            LOG << "Core inside goal radius, but mission not complete: swarm quality invalid."
+                << std::endl;
+         }
 
          return;
       }
 
-      /*
-         Intermediate waypoint switch.
-         Larger acceptance radius prevents orbiting/chattering around waypoint.
-      */
       if(!final_wp && dist < accept_radius) {
          current_wp++;
          last_dist_to_wp = 1e9;
@@ -534,11 +635,6 @@ public:
          return;
       }
 
-      /*
-         Stuck detector.
-         If distance does not improve for too long, force the next waypoint.
-         Do not skip the final goal completion condition.
-      */
       if(dist > last_dist_to_wp - 0.004) {
          stuck_counter++;
       } else {
@@ -556,13 +652,25 @@ public:
       }
    }
 
+   bool IsMissionSafeToComplete() const {
+      Real lambda2 = Lambda2FastProxy();
+      Real min_dd = MinDecoyDistance();
+      Real min_od = MinObstacleDecoyDistance();
+      Real pinfl  = ProtectionInfluentialMean();
+
+      return
+         lambda2 > complete_min_lambda2_proxy &&
+         min_dd  > complete_min_decoy_dist &&
+         min_od  > complete_min_obs_dist &&
+         pinfl   > complete_min_protection;
+   }
+
    void InitDefinedFormation() {
       std::vector<CVector3> core_offsets = {
          CVector3( 0.00,  0.00, 0.00),
-         CVector3( 0.25,  0.00, 0.00),
-         CVector3(-0.25,  0.00, 0.00),
-         CVector3( 0.00,  0.25, 0.00),
-         CVector3( 0.00, -0.25, 0.00)
+         CVector3( 0.28,  0.00, 0.00),
+         CVector3(-0.28,  0.00, 0.00),
+         CVector3( 0.00,  0.28, 0.00)
       };
 
       int i = 0;
@@ -598,7 +706,8 @@ public:
 
       initialized = true;
 
-      LOG << "Defined ring formation initialized at z=" << flight_z << std::endl;
+      LOG << "Defined 4-influential + 26-decoy ring formation initialized at z="
+          << flight_z << std::endl;
    }
 
    CVector3 InfluentialSeparation(const Agent& a) const {
@@ -618,13 +727,15 @@ public:
       return f;
    }
 
-   CVector3 DecoySeparation(const Agent& a) const {
+   CVector3 DecoySeparationFromPositions(const CVector3& y,
+                                         const std::vector<CVector3>& decoys,
+                                         int self) const {
       CVector3 f(0,0,0);
 
-      for(const auto& b : agents) {
-         if(b.influential || a.id == b.id) continue;
+      for(size_t k = 0; k < decoys.size(); ++k) {
+         if(static_cast<int>(k) == self) continue;
 
-         CVector3 d = XYOnly(a.pos - b.pos);
+         CVector3 d = XYOnly(y - decoys[k]);
          Real L = d.Length();
 
          if(L < dec_sep_radius && L > 1e-6) {
@@ -635,21 +746,21 @@ public:
       return f;
    }
 
-   CVector3 BandForceNearestInfluential(const Agent& a) const {
+   CVector3 BandForceNearestInfluentialFromPositions(const CVector3& y,
+                                                     const std::vector<CVector3>& infls) const {
       Real best = std::numeric_limits<Real>::max();
       CVector3 nearest(0,0,flight_z);
 
-      for(const auto& b : agents) {
-         if(!b.influential) continue;
+      for(const auto& x : infls) {
+         Real d = XYOnly(y - x).Length();
 
-         Real d = XYOnly(a.pos - b.pos).Length();
          if(d < best) {
             best = d;
-            nearest = b.pos;
+            nearest = x;
          }
       }
 
-      CVector3 radial = XYOnly(a.pos - nearest);
+      CVector3 radial = XYOnly(y - nearest);
       Real d = radial.Length();
 
       if(d < 1e-6) {
@@ -669,27 +780,6 @@ public:
       }
 
       return CVector3(0,0,0);
-   }
-
-   CVector3 SlotTarget(const Agent& a, const CVector3& core) const {
-      int ndec = CountDec();
-      if(ndec <= 0 || a.slot < 0) {
-         return core;
-      }
-
-      Real th0 = 2.0 * ARGOS_PI * static_cast<Real>(a.slot) / ndec;
-
-      /*
-         Almost no rotation. This avoids orbiting and crowding at the goal.
-      */
-      Real rot = 0.00025 * static_cast<Real>(step);
-      Real th = th0 + rot;
-
-      return SetFlightZ(core + CVector3(
-         rring * std::cos(th),
-         rring * std::sin(th),
-         0.0
-      ));
    }
 
    void UpdateInfluentials() {
@@ -726,31 +816,769 @@ public:
       }
    }
 
+   CVector3 MeanPosition(const std::vector<CVector3>& pts) const {
+      if(pts.empty()) {
+         return CVector3(0,0,flight_z);
+      }
+
+      CVector3 c(0,0,0);
+
+      for(const auto& p : pts) {
+         c += p;
+      }
+
+      c /= static_cast<Real>(pts.size());
+      c.SetZ(flight_z);
+
+      return c;
+   }
+
+   CVector3 SlotTargetByIndex(int dec_idx, const CVector3& core) const {
+      int ndec = CountDec();
+
+      if(ndec <= 0) {
+         return core;
+      }
+
+      Real th0 = 2.0 * ARGOS_PI * static_cast<Real>(dec_idx) / ndec;
+
+      /*
+         No strong orbiting. Ring should translate with the core.
+      */
+      Real rot = 0.00005 * static_cast<Real>(step);
+      Real th = th0 + rot;
+
+      return SetFlightZ(core + CVector3(
+         rring * std::cos(th),
+         rring * std::sin(th),
+         0.0
+      ));
+   }
+
+   CVector3 SlotTarget(const Agent& a, const CVector3& core) const {
+      return SlotTargetByIndex(a.slot, core);
+   }
+
+   CVector3 DecoyForceWithChromosome(const CVector3& y,
+                                     const CVector3& v,
+                                     int dec_idx,
+                                     const Chromosome& c,
+                                     const std::vector<CVector3>& infls,
+                                     const std::vector<CVector3>& decoys,
+                                     const CVector3& slot_target,
+                                     const CVector3& core_target_dir) const {
+      CVector3 core = MeanPosition(infls);
+
+      CVector3 f_cent = XYOnly(core - y);
+      CVector3 f_sep  = DecoySeparationFromPositions(y, decoys, dec_idx);
+      CVector3 f_band = BandForceNearestInfluentialFromPositions(y, infls);
+      CVector3 f_obs  = ObstacleForceXY(y, c.wobs);
+
+      /*
+         Strong assigned-slot force keeps the decoy attached to its protection slot.
+      */
+      CVector3 f_slot = XYOnly(slot_target - y) * k_slot_bias;
+
+      CVector3 radial = NormalizeSafeXY(y - core);
+      CVector3 tangent(-radial.GetY(), radial.GetX(), 0.0);
+      CVector3 f_tangent = tangent * k_tangent;
+
+      /*
+         GA tunes local behavior, but the ring slot is always enforced.
+      */
+      CVector3 f =
+         f_cent * (0.30 * c.wcent) +
+         f_sep  * c.wsep +
+         f_band * (1.20 * c.wband) +
+         f_obs +
+         core_target_dir * 0.010 +
+         f_slot +
+         f_tangent;
+
+      return LimitXY(v + f, c.s);
+   }
+
+   Real BandMembership(Real d) const {
+      Real delta = 0.0;
+
+      if(d < rmin) {
+         delta = rmin - d;
+      } else if(d > rmax) {
+         delta = d - rmax;
+      }
+
+      return std::exp(-delta / std::max(tau, 1e-6));
+   }
+
+   Real CandidateProtectionReward(const CVector3& y, const std::vector<CVector3>& infls) const {
+      Real best = 0.0;
+
+      for(const auto& x : infls) {
+         Real d = XYOnly(y - x).Length();
+         best = std::max(best, BandMembership(d));
+      }
+
+      return best;
+   }
+
+   Real CandidateObstaclePenalty(const CVector3& y) const {
+      Real pen = 0.0;
+
+      for(const auto& o : obstacles) {
+         Real phi = SDFBox(y, o) - obs_safe;
+
+         if(phi < 0.0) {
+            pen += 5.0 + (-phi * 10.0);
+         }
+         else if(phi < obs_influence) {
+            pen += (obs_influence - phi) / obs_influence;
+         }
+      }
+
+      return pen;
+   }
+
+   Real CandidateConnectivityReward(const std::vector<CVector3>& infls,
+                                    const std::vector<CVector3>& decoys) const {
+      std::vector<CVector3> pts;
+
+      for(const auto& x : infls) pts.push_back(x);
+      for(const auto& y : decoys) pts.push_back(y);
+
+      int n = static_cast<int>(pts.size());
+      if(n < 2) return 0.0;
+
+      int edges = 0;
+
+      for(int i = 0; i < n; ++i) {
+         for(int j = i + 1; j < n; ++j) {
+            if(XYOnly(pts[i] - pts[j]).Length() <= graph_radius) {
+               edges++;
+            }
+         }
+      }
+
+      return Clamp01(static_cast<Real>(edges) / static_cast<Real>(n * 3));
+   }
+
+   Real CandidateSlotReward(const CVector3& y, const CVector3& slot) const {
+      Real d = XYOnly(y - slot).Length();
+      return std::exp(-d / 0.8);
+   }
+
+   std::vector<Real> StructuralScoresFromPoints(const std::vector<CVector3>& pts) const {
+      int n = static_cast<int>(pts.size());
+
+      std::vector<Real> S(n, 0.0);
+
+      if(n <= 1) {
+         return S;
+      }
+
+      std::vector<std::vector<int>> A(n, std::vector<int>(n, 0));
+      std::vector<std::vector<Real>> Dmat(n, std::vector<Real>(n, 0.0));
+
+      for(int i = 0; i < n; ++i) {
+         for(int j = i + 1; j < n; ++j) {
+            Real d = XYOnly(pts[i] - pts[j]).Length();
+
+            Dmat[i][j] = d;
+            Dmat[j][i] = d;
+
+            if(d <= graph_radius) {
+               A[i][j] = 1;
+               A[j][i] = 1;
+            }
+         }
+      }
+
+      std::vector<Real> deg(n, 0.0);
+      for(int i = 0; i < n; ++i) {
+         for(int j = 0; j < n; ++j) {
+            deg[i] += A[i][j];
+         }
+      }
+
+      /*
+         Lightweight dominant eigenvector approximation.
+      */
+      std::vector<Real> eig(n, 1.0 / static_cast<Real>(n));
+
+      for(int it = 0; it < 20; ++it) {
+         std::vector<Real> next(n, 0.0);
+
+         for(int i = 0; i < n; ++i) {
+            for(int j = 0; j < n; ++j) {
+               next[i] += static_cast<Real>(A[i][j]) * eig[j];
+            }
+         }
+
+         Real L = 0.0;
+         for(int i = 0; i < n; ++i) {
+            L += next[i] * next[i];
+         }
+
+         L = std::sqrt(std::max(L, 1e-12));
+
+         for(int i = 0; i < n; ++i) {
+            eig[i] = std::fabs(next[i] / L);
+         }
+      }
+
+      std::vector<Real> uniformity(n, 0.0);
+      std::vector<Real> angular(n, 0.0);
+
+      for(int i = 0; i < n; ++i) {
+         std::vector<Real> lens;
+         std::vector<Real> angles;
+
+         for(int j = 0; j < n; ++j) {
+            if(A[i][j]) {
+               lens.push_back(Dmat[i][j]);
+
+               CVector3 r = XYOnly(pts[j] - pts[i]);
+               angles.push_back(std::atan2(r.GetY(), r.GetX()));
+            }
+         }
+
+         if(lens.empty()) {
+            uniformity[i] = 0.0;
+            angular[i] = 0.0;
+         } else {
+            Real mean = 0.0;
+            for(Real l : lens) mean += l;
+            mean /= static_cast<Real>(lens.size());
+
+            Real var = 0.0;
+            for(Real l : lens) {
+               Real e = l - mean;
+               var += e * e;
+            }
+            var /= static_cast<Real>(lens.size());
+
+            Real sigma = std::sqrt(var);
+            Real cv = sigma / std::max(mean, 1e-6);
+
+            uniformity[i] = 1.0 / (1.0 + cv);
+
+            if(angles.size() < 2) {
+               angular[i] = 0.0;
+            } else {
+               for(auto& a : angles) {
+                  while(a < 0.0) a += 2.0 * ARGOS_PI;
+                  while(a >= 2.0 * ARGOS_PI) a -= 2.0 * ARGOS_PI;
+               }
+
+               std::sort(angles.begin(), angles.end());
+
+               Real max_gap = 0.0;
+
+               for(size_t k = 0; k < angles.size(); ++k) {
+                  Real a1 = angles[k];
+                  Real a2 = angles[(k + 1) % angles.size()];
+
+                  Real gap = 0.0;
+
+                  if(k == angles.size() - 1) {
+                     gap = (a2 + 2.0 * ARGOS_PI) - a1;
+                  } else {
+                     gap = a2 - a1;
+                  }
+
+                  max_gap = std::max(max_gap, gap);
+               }
+
+               angular[i] = 1.0 - max_gap / (2.0 * ARGOS_PI);
+            }
+         }
+      }
+
+      std::vector<Real> deg_n = MinMaxNormalize(deg);
+      std::vector<Real> eig_n = MinMaxNormalize(eig);
+      std::vector<Real> uni_n = MinMaxNormalize(uniformity);
+      std::vector<Real> ang_n = MinMaxNormalize(angular);
+
+      for(int i = 0; i < n; ++i) {
+         S[i] =
+            0.2 * eig_n[i] +
+            0.2 * deg_n[i] +
+            0.3 * uni_n[i] +
+            0.3 * ang_n[i];
+      }
+
+      return S;
+   }
+
+   Real MeanInfluentialStructuralScore(const std::vector<CVector3>& infls,
+                                       const std::vector<CVector3>& decoys) const {
+      std::vector<CVector3> pts;
+      std::vector<int> is_infl;
+
+      for(const auto& x : infls) {
+         pts.push_back(x);
+         is_infl.push_back(1);
+      }
+
+      for(const auto& y : decoys) {
+         pts.push_back(y);
+         is_infl.push_back(0);
+      }
+
+      std::vector<Real> S = StructuralScoresFromPoints(pts);
+
+      Real sum = 0.0;
+      int count = 0;
+
+      for(size_t i = 0; i < S.size(); ++i) {
+         if(is_infl[i]) {
+            sum += S[i];
+            count++;
+         }
+      }
+
+      if(count == 0) return 0.0;
+      return sum / static_cast<Real>(count);
+   }
+
+   Real EvaluateChromosome(int dec_idx,
+                           const CVector3& y0,
+                           const CVector3& v0,
+                           const Chromosome& c,
+                           const std::vector<CVector3>& infls0,
+                           const std::vector<CVector3>& decoys0) const {
+      std::vector<CVector3> infls = infls0;
+      std::vector<CVector3> decoys = decoys0;
+
+      CVector3 y = y0;
+      CVector3 v = v0;
+
+      Real fitness = 0.0;
+
+      CVector3 target = CurrentTarget();
+      CVector3 core0 = MeanPosition(infls);
+      CVector3 core_target_dir = NormalizeSafeXY(target - core0);
+
+      for(UInt32 h = 0; h < horizon; ++h) {
+         CVector3 core = MeanPosition(infls);
+         CVector3 dir = NormalizeSafeXY(target - core);
+
+         for(auto& x : infls) {
+            CVector3 f = dir * infl_step_max;
+            x = ProjectOutside(x + f);
+         }
+
+         CVector3 slot_target = SlotTargetByIndex(dec_idx, MeanPosition(infls));
+
+         v = DecoyForceWithChromosome(y, v, dec_idx, c, infls, decoys, slot_target, core_target_dir);
+         y = ProjectOutside(y + v);
+
+         if(dec_idx >= 0 && dec_idx < static_cast<int>(decoys.size())) {
+            decoys[dec_idx] = y;
+         }
+
+         Real prot_reward = CandidateProtectionReward(y, infls);
+         Real struct_reward = MeanInfluentialStructuralScore(infls, decoys);
+         Real obs_pen = CandidateObstaclePenalty(y);
+         Real move_pen = v.Length() * v.Length();
+         Real conn_reward = CandidateConnectivityReward(infls, decoys);
+         Real slot_reward = CandidateSlotReward(y, slot_target);
+
+         fitness +=
+            fit_prot   * prot_reward +
+            fit_struct * struct_reward +
+            fit_conn   * conn_reward +
+            fit_slot   * slot_reward -
+            fit_obs    * obs_pen -
+            fit_move   * move_pen;
+      }
+
+      return fitness / static_cast<Real>(std::max<UInt32>(1, horizon));
+   }
+
+   void ReplanAllDecoys() {
+      if(mission_complete) {
+         return;
+      }
+
+      if(step % replan_period != 0) {
+         return;
+      }
+
+      std::vector<CVector3> infls;
+      std::vector<CVector3> decoys;
+
+      for(const auto& a : agents) {
+         if(a.influential) infls.push_back(a.pos);
+         else decoys.push_back(a.pos);
+      }
+
+      int dec_idx = 0;
+
+      for(auto& a : agents) {
+         if(a.influential) {
+            continue;
+         }
+
+         for(auto& c : a.population) {
+            c.fitness = EvaluateChromosome(dec_idx, a.pos, a.vel, c, infls, decoys);
+         }
+
+         std::sort(a.population.begin(), a.population.end(),
+            [](const Chromosome& p, const Chromosome& q) {
+               return p.fitness > q.fitness;
+            });
+
+         if(!a.population.empty()) {
+            a.active = a.population[0];
+         }
+
+         std::vector<Chromosome> next;
+
+         if(a.population.size() >= 1) {
+            next.push_back(a.population[0]);
+         }
+
+         while(next.size() < population_size) {
+            size_t pool = std::min<size_t>(2, a.population.size());
+            const Chromosome& p1 = a.population[std::rand() % pool];
+            const Chromosome& p2 = a.population[std::rand() % pool];
+
+            Chromosome child = Crossover(p1, p2);
+            child = MutateChromosome(child);
+
+            next.push_back(child);
+         }
+
+         a.population = next;
+         dec_idx++;
+      }
+   }
+
    void UpdateDecoys() {
+      ReplanAllDecoys();
+
       CVector3 core = CoreCentroid();
       CVector3 target = CurrentTarget();
       CVector3 core_target_dir = NormalizeSafeXY(target - core);
 
+      std::vector<CVector3> infls;
+      std::vector<CVector3> decoys;
+
+      for(const auto& a : agents) {
+         if(a.influential) infls.push_back(a.pos);
+         else decoys.push_back(a.pos);
+      }
+
+      int dec_idx = 0;
+
       for(auto& a : agents) {
-         if(a.influential) continue;
+         if(a.influential) {
+            continue;
+         }
 
          CVector3 slot = SlotTarget(a, core);
 
-         CVector3 f_shape = XYOnly(slot - a.pos) * k_shape;
-         CVector3 f_band = BandForceNearestInfluential(a) * k_band;
-         CVector3 f_sep = DecoySeparation(a) * k_dec_sep;
-         CVector3 f_follow = core_target_dir * k_follow;
-         CVector3 f_obs = ObstacleForceXY(a.pos, k_obs_dec);
+         CVector3 vnew = DecoyForceWithChromosome(
+            a.pos,
+            a.vel,
+            dec_idx,
+            a.active,
+            infls,
+            decoys,
+            slot,
+            core_target_dir
+         );
 
-         CVector3 radial = NormalizeSafeXY(a.pos - core);
-         CVector3 tangent(-radial.GetY(), radial.GetX(), 0.0);
-         CVector3 f_tangent = tangent * k_tangent;
-
-         CVector3 f = f_shape + f_band + f_sep + f_follow + f_obs + f_tangent;
-
-         a.vel = LimitXY(f, dec_step_max);
+         a.vel = vnew;
          a.pos = ProjectOutside(a.pos + a.vel);
+
+         /*
+            Connectivity rescue:
+            If a decoy has drifted too far from its assigned protection slot,
+            pull it back. This prevents disconnected trailing subgroups.
+         */
+         CVector3 to_slot = XYOnly(slot - a.pos);
+         Real slot_dist = to_slot.Length();
+
+         if(slot_dist > 1.10) {
+            CVector3 rescue = LimitXY(to_slot * 0.35, 0.070);
+            a.pos = ProjectOutside(a.pos + rescue);
+            a.vel *= 0.25;
+         }
+
+         /*
+            Core-distance rescue:
+            If a decoy is outside the protection envelope by a large margin,
+            pull it back to the moving ring.
+         */
+         Real dcore = XYOnly(a.pos - core).Length();
+
+         if(dcore > rmax + 0.85) {
+            CVector3 pull = LimitXY(slot - a.pos, 0.080);
+            a.pos = ProjectOutside(a.pos + pull);
+            a.vel *= 0.20;
+         }
+
+         if(dec_idx >= 0 && dec_idx < static_cast<int>(decoys.size())) {
+            decoys[dec_idx] = a.pos;
+         }
+
+         dec_idx++;
       }
+   }
+
+   Real AngularUniformity(const std::vector<Real>& angles_in) const {
+      if(angles_in.size() < 2) {
+         return 0.0;
+      }
+
+      std::vector<Real> angles = angles_in;
+
+      for(auto& a : angles) {
+         while(a < 0.0) a += 2.0 * ARGOS_PI;
+         while(a >= 2.0 * ARGOS_PI) a -= 2.0 * ARGOS_PI;
+      }
+
+      std::sort(angles.begin(), angles.end());
+
+      Real ideal = 2.0 * ARGOS_PI / static_cast<Real>(angles.size());
+      Real acc = 0.0;
+
+      for(size_t i = 0; i < angles.size(); ++i) {
+         Real a1 = angles[i];
+         Real a2 = angles[(i + 1) % angles.size()];
+
+         Real gap = 0.0;
+
+         if(i == angles.size() - 1) {
+            gap = (a2 + 2.0 * ARGOS_PI) - a1;
+         } else {
+            gap = a2 - a1;
+         }
+
+         acc += std::fabs((gap - ideal) / std::max(ideal, 1e-6));
+      }
+
+      return std::exp(-acc / static_cast<Real>(angles.size()));
+   }
+
+   std::vector<Real> ProtectionDiagnosticVector() const {
+      std::vector<CVector3> infls;
+      std::vector<CVector3> decoys;
+
+      for(const auto& a : agents) {
+         if(a.influential) infls.push_back(a.pos);
+         else decoys.push_back(a.pos);
+      }
+
+      std::vector<Real> P;
+
+      /*
+         Influential protection.
+      */
+      for(const auto& x : infls) {
+         Real sumB = 0.0;
+         std::vector<Real> angles;
+
+         for(const auto& y : decoys) {
+            CVector3 r = XYOnly(y - x);
+            Real d = r.Length();
+
+            sumB += BandMembership(d);
+            angles.push_back(std::atan2(r.GetY(), r.GetX()));
+         }
+
+         Real meanB = decoys.empty() ? 0.0 : sumB / static_cast<Real>(decoys.size());
+         Real gamma = AngularUniformity(angles);
+
+         P.push_back(0.8 * meanB + 0.2 * gamma);
+      }
+
+      /*
+         Decoy diagnostic protection.
+      */
+      std::vector<CVector3> allpts;
+
+      for(const auto& x : infls) allpts.push_back(x);
+      for(const auto& y : decoys) allpts.push_back(y);
+
+      for(size_t j = 0; j < decoys.size(); ++j) {
+         CVector3 y = decoys[j];
+
+         Real sumB = 0.0;
+         int count = 0;
+         std::vector<Real> angles;
+
+         for(size_t q = 0; q < allpts.size(); ++q) {
+            CVector3 r = XYOnly(allpts[q] - y);
+            Real d = r.Length();
+
+            if(d < 1e-8) {
+               continue;
+            }
+
+            sumB += BandMembership(d);
+            angles.push_back(std::atan2(r.GetY(), r.GetX()));
+            count++;
+         }
+
+         Real meanB = (count == 0) ? 0.0 : sumB / static_cast<Real>(count);
+         Real gamma = AngularUniformity(angles);
+
+         P.push_back(0.8 * meanB + 0.2 * gamma);
+      }
+
+      return P;
+   }
+
+   Real ProtectionInfluentialMean() const {
+      std::vector<Real> P = ProtectionDiagnosticVector();
+      int m = CountInfl();
+
+      if(m <= 0 || P.empty()) {
+         return 0.0;
+      }
+
+      Real sum = 0.0;
+      int count = std::min<int>(m, static_cast<int>(P.size()));
+
+      for(int i = 0; i < count; ++i) {
+         sum += P[i];
+      }
+
+      return sum / static_cast<Real>(count);
+   }
+
+   std::vector<Real> StructuralScores() const {
+      std::vector<CVector3> pts;
+
+      for(const auto& a : agents) {
+         pts.push_back(a.pos);
+      }
+
+      return StructuralScoresFromPoints(pts);
+   }
+
+   std::vector<Real> MinMaxNormalize(const std::vector<Real>& x) const {
+      std::vector<Real> y(x.size(), 0.0);
+
+      if(x.empty()) {
+         return y;
+      }
+
+      Real mn = *std::min_element(x.begin(), x.end());
+      Real mx = *std::max_element(x.begin(), x.end());
+
+      Real den = mx - mn;
+
+      if(den < 1e-9) {
+         return y;
+      }
+
+      for(size_t i = 0; i < x.size(); ++i) {
+         y[i] = (x[i] - mn) / den;
+      }
+
+      return y;
+   }
+
+   Real Percentile(std::vector<Real> v, Real p) const {
+      if(v.empty()) {
+         return 0.0;
+      }
+
+      std::sort(v.begin(), v.end());
+
+      Real idx = p * static_cast<Real>(v.size() - 1);
+      int i0 = static_cast<int>(std::floor(idx));
+      int i1 = static_cast<int>(std::ceil(idx));
+
+      if(i0 < 0) i0 = 0;
+      if(i1 < 0) i1 = 0;
+      if(i0 >= static_cast<int>(v.size())) i0 = static_cast<int>(v.size()) - 1;
+      if(i1 >= static_cast<int>(v.size())) i1 = static_cast<int>(v.size()) - 1;
+
+      Real t = idx - static_cast<Real>(i0);
+
+      return v[i0] * (1.0 - t) + v[i1] * t;
+   }
+
+   Real Mean(const std::vector<Real>& v) const {
+      if(v.empty()) {
+         return 0.0;
+      }
+
+      Real s = 0.0;
+      for(Real x : v) {
+         s += x;
+      }
+
+      return s / static_cast<Real>(v.size());
+   }
+
+   Real Lambda2FastProxy() const {
+      std::vector<CVector3> pts;
+
+      for(const auto& a : agents) {
+         pts.push_back(a.pos);
+      }
+
+      const int n = static_cast<int>(pts.size());
+      if(n < 2) {
+         return 0.0;
+      }
+
+      std::vector<std::vector<int>> A(n, std::vector<int>(n, 0));
+
+      for(int i = 0; i < n; ++i) {
+         for(int j = i + 1; j < n; ++j) {
+            Real d = XYOnly(pts[i] - pts[j]).Length();
+
+            if(d <= graph_radius) {
+               A[i][j] = 1;
+               A[j][i] = 1;
+            }
+         }
+      }
+
+      std::vector<int> visited(n, 0);
+      std::vector<int> stack;
+
+      stack.push_back(0);
+      visited[0] = 1;
+
+      while(!stack.empty()) {
+         int u = stack.back();
+         stack.pop_back();
+
+         for(int v = 0; v < n; ++v) {
+            if(A[u][v] && !visited[v]) {
+               visited[v] = 1;
+               stack.push_back(v);
+            }
+         }
+      }
+
+      for(int i = 0; i < n; ++i) {
+         if(!visited[i]) {
+            return 0.0;
+         }
+      }
+
+      Real deg_sum = 0.0;
+
+      for(int i = 0; i < n; ++i) {
+         Real deg = 0.0;
+         for(int j = 0; j < n; ++j) {
+            deg += A[i][j];
+         }
+         deg_sum += deg;
+      }
+
+      /*
+         Not exact lambda2. This is a fast live connectivity proxy.
+      */
+      return deg_sum / static_cast<Real>(n);
    }
 
    Real AvgBandError() const {
@@ -814,81 +1642,10 @@ public:
       return best;
    }
 
-   Real Lambda2Proxy() const {
-      const int n = static_cast<int>(agents.size());
-
-      if(n < 2) return 0.0;
-
-      std::vector<std::vector<int>> A(n, std::vector<int>(n, 0));
-
-      for(int i = 0; i < n; ++i) {
-         for(int j = i + 1; j < n; ++j) {
-            Real d = XYOnly(agents[i].pos - agents[j].pos).Length();
-
-            if(d <= graph_radius) {
-               A[i][j] = 1;
-               A[j][i] = 1;
-            }
-         }
-      }
-
-      std::vector<int> visited(n, 0);
-      std::vector<int> stack;
-
-      stack.push_back(0);
-      visited[0] = 1;
-
-      while(!stack.empty()) {
-         int u = stack.back();
-         stack.pop_back();
-
-         for(int v = 0; v < n; ++v) {
-            if(A[u][v] && !visited[v]) {
-               visited[v] = 1;
-               stack.push_back(v);
-            }
-         }
-      }
-
-      for(int i = 0; i < n; ++i) {
-         if(!visited[i]) return 0.0;
-      }
-
-      Real deg_sum = 0.0;
-
-      for(int i = 0; i < n; ++i) {
-         Real deg = 0.0;
-
-         for(int j = 0; j < n; ++j) {
-            deg += A[i][j];
-         }
-
-         deg_sum += deg;
-      }
-
-      return deg_sum / static_cast<Real>(n);
-   }
-
    Real Clamp01(Real x) const {
       if(x < 0.0) return 0.0;
       if(x > 1.0) return 1.0;
       return x;
-   }
-
-   Real ProtectionScore() const {
-      return std::exp(-AvgBandError() / std::max(tau, 1e-6));
-   }
-
-   Real ConnectivityScore() const {
-      return Clamp01(Lambda2Proxy() / 25.0);
-   }
-
-   Real ObstacleSafetyScore() const {
-      return Clamp01(MinObstacleDecoyDistance() / 0.80);
-   }
-
-   Real DecoySpacingScore() const {
-      return Clamp01(MinDecoyDistance() / 0.22);
    }
 
    Real GoalProgressScore() const {
@@ -898,21 +1655,23 @@ public:
       return Clamp01(1.0 - dist_goal / std::max(initial_goal_dist, 1e-6));
    }
 
-   Real CriticalityScore() const {
-      Real p_prot = ProtectionScore();
-      Real p_conn = ConnectivityScore();
-      Real p_obs  = ObstacleSafetyScore();
-      Real p_sep  = DecoySpacingScore();
-      Real p_goal = GoalProgressScore();
+   Real CriticalityScore(Real combined_margin_mean,
+                         Real lambda2,
+                         Real min_od,
+                         Real min_dd) const {
+      Real margin_score = Clamp01(0.5 + 0.5 * combined_margin_mean);
+      Real conn_score = Clamp01(lambda2 / 20.0);
+      Real obs_score = Clamp01(min_od / 0.80);
+      Real sep_score = Clamp01(min_dd / 0.22);
+      Real goal_score = GoalProgressScore();
 
-      Real score =
-         0.35 * p_prot +
-         0.20 * p_conn +
-         0.20 * p_obs  +
-         0.15 * p_sep  +
-         0.10 * p_goal;
-
-      return Clamp01(score);
+      return Clamp01(
+         0.35 * margin_score +
+         0.20 * conn_score +
+         0.20 * obs_score +
+         0.15 * sep_score +
+         0.10 * goal_score
+      );
    }
 
    void ApplyMovement() {
@@ -952,25 +1711,90 @@ public:
       ApplyMovement();
       ApplyObstacleVisuals();
 
-      if(csv.is_open() && step % 5 == 0) {
-         CVector3 core = CoreCentroid();
-         CVector3 target = CurrentTarget();
+      if(csv.is_open() && step % csv_log_period == 0) {
+         WriteLogRow(false);
+      }
 
-         Real dist_wp   = XYOnly(target - core).Length();
-         Real dist_goal = XYOnly(goal - core).Length();
+      if(step % terminal_log_period == 0) {
+         WriteLogRow(true);
+      }
+   }
 
-         Real band_err = AvgBandError();
-         Real min_dd   = MinDecoyDistance();
-         Real min_od   = MinObstacleDecoyDistance();
-         Real lambda2  = Lambda2Proxy();
+   void WriteLogRow(bool terminal) {
+      CVector3 core = CoreCentroid();
+      CVector3 target = CurrentTarget();
 
-         Real p_prot = ProtectionScore();
-         Real p_conn = ConnectivityScore();
-         Real p_obs  = ObstacleSafetyScore();
-         Real p_sep  = DecoySpacingScore();
-         Real p_goal = GoalProgressScore();
-         Real crit   = CriticalityScore();
+      Real dist_wp   = XYOnly(target - core).Length();
+      Real dist_goal = XYOnly(goal - core).Length();
 
+      Real band_err = AvgBandError();
+      Real min_dd   = MinDecoyDistance();
+      Real min_od   = MinObstacleDecoyDistance();
+      Real lambda2  = Lambda2FastProxy();
+
+      std::vector<Real> P = ProtectionDiagnosticVector();
+      std::vector<Real> S = StructuralScores();
+
+      int m = CountInfl();
+      int n = CountDec();
+
+      std::vector<Real> P_infl, P_dec;
+      std::vector<Real> S_infl, S_dec;
+      std::vector<Real> J_infl, J_dec;
+
+      Real lambdaP = fit_prot;
+      Real lambdaS = fit_struct;
+
+      for(int i = 0; i < m + n; ++i) {
+         Real p = (i < static_cast<int>(P.size())) ? P[i] : 0.0;
+         Real s = (i < static_cast<int>(S.size())) ? S[i] : 0.0;
+         Real j = (lambdaP * p + lambdaS * s) / std::max(lambdaP + lambdaS, 1e-6);
+
+         if(i < m) {
+            P_infl.push_back(p);
+            S_infl.push_back(s);
+            J_infl.push_back(j);
+         } else {
+            P_dec.push_back(p);
+            S_dec.push_back(s);
+            J_dec.push_back(j);
+         }
+      }
+
+      Real prot_infl_mean = Mean(P_infl);
+      Real prot_dec_mean  = Mean(P_dec);
+      Real struct_infl_mean = Mean(S_infl);
+      Real struct_dec_mean  = Mean(S_dec);
+      Real combined_infl_mean = Mean(J_infl);
+      Real combined_dec_mean  = Mean(J_dec);
+
+      Real margin_prot_mean = prot_infl_mean - prot_dec_mean;
+      Real margin_struct_mean = struct_infl_mean - struct_dec_mean;
+      Real margin_combined_mean = combined_infl_mean - combined_dec_mean;
+
+      Real margin_prot_robust = Percentile(P_infl, 0.25) - Percentile(P_dec, 0.75);
+      Real margin_struct_robust = Percentile(S_infl, 0.25) - Percentile(S_dec, 0.75);
+      Real margin_combined_robust = Percentile(J_infl, 0.25) - Percentile(J_dec, 0.75);
+
+      Real margin_prot_worst =
+         (P_infl.empty() || P_dec.empty()) ? 0.0 :
+         *std::min_element(P_infl.begin(), P_infl.end()) -
+         *std::max_element(P_dec.begin(), P_dec.end());
+
+      Real margin_struct_worst =
+         (S_infl.empty() || S_dec.empty()) ? 0.0 :
+         *std::min_element(S_infl.begin(), S_infl.end()) -
+         *std::max_element(S_dec.begin(), S_dec.end());
+
+      Real margin_combined_worst =
+         (J_infl.empty() || J_dec.empty()) ? 0.0 :
+         *std::min_element(J_infl.begin(), J_infl.end()) -
+         *std::max_element(J_dec.begin(), J_dec.end());
+
+      Real goal_prog = GoalProgressScore();
+      Real crit = CriticalityScore(margin_combined_mean, lambda2, min_od, min_dd);
+
+      if(!terminal) {
          csv << step << ","
              << current_wp << ","
              << core.GetX() << ","
@@ -982,50 +1806,39 @@ public:
              << min_dd << ","
              << min_od << ","
              << lambda2 << ","
-             << p_prot << ","
-             << p_conn << ","
-             << p_obs << ","
-             << p_sep << ","
-             << p_goal << ","
+             << prot_infl_mean << ","
+             << prot_dec_mean << ","
+             << struct_infl_mean << ","
+             << struct_dec_mean << ","
+             << combined_infl_mean << ","
+             << combined_dec_mean << ","
+             << margin_prot_mean << ","
+             << margin_prot_robust << ","
+             << margin_prot_worst << ","
+             << margin_struct_mean << ","
+             << margin_struct_robust << ","
+             << margin_struct_worst << ","
+             << margin_combined_mean << ","
+             << margin_combined_robust << ","
+             << margin_combined_worst << ","
+             << goal_prog << ","
              << crit << ","
              << (mission_complete ? 1 : 0)
              << "\n";
-      }
-
-      if(step % 50 == 0) {
-         CVector3 core = CoreCentroid();
-         CVector3 target = CurrentTarget();
-
-         Real dist_wp   = XYOnly(target - core).Length();
-         Real dist_goal = XYOnly(goal - core).Length();
-
-         Real band_err = AvgBandError();
-         Real min_dd   = MinDecoyDistance();
-         Real min_od   = MinObstacleDecoyDistance();
-         Real lambda2  = Lambda2Proxy();
-
-         Real p_prot = ProtectionScore();
-         Real p_conn = ConnectivityScore();
-         Real p_obs  = ObstacleSafetyScore();
-         Real p_sep  = DecoySpacingScore();
-         Real p_goal = GoalProgressScore();
-         Real crit   = CriticalityScore();
-
+      } else {
          LOG << "[t=" << step << "]"
              << " wp=" << current_wp
              << " core=(" << core.GetX() << "," << core.GetY() << "," << core.GetZ() << ")"
-             << " dist_wp=" << dist_wp
              << " dist_goal=" << dist_goal
-             << " band_err=" << band_err
              << " min_dd=" << min_dd
              << " min_od=" << min_od
              << " lambda2_proxy=" << lambda2
-             << " prot=" << p_prot
-             << " conn=" << p_conn
-             << " obs_safe=" << p_obs
-             << " sep_safe=" << p_sep
-             << " goal_prog=" << p_goal
-             << " criticality=" << crit
+             << " Pinfl=" << prot_infl_mean
+             << " Pdec=" << prot_dec_mean
+             << " Sinfl=" << struct_infl_mean
+             << " Sdec=" << struct_dec_mean
+             << " Jmargin=" << margin_combined_mean
+             << " crit=" << crit
              << " mission_complete=" << (mission_complete ? 1 : 0)
              << std::endl;
       }
