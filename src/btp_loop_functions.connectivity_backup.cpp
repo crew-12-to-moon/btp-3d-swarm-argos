@@ -12,7 +12,6 @@
 #include <fstream>
 #include <limits>
 #include <cstdlib>
-#include <utility>
 
 using namespace argos;
 
@@ -94,11 +93,10 @@ public:
    Real k_obs_infl      = 0.050;
 
    /*
-      Protection-first stabilization.
-      Slot force is intentionally strong.
-      Connectivity rescue is now slot/core biased, not clump biased.
+      Stabilization gains
+      Slot bias is intentionally strong so decoys remain in a protective ring.
    */
-   Real k_slot_bias = 0.140;
+   Real k_slot_bias = 0.090;
    Real k_tangent   = 0.0005;
 
    Real infl_sep_radius = 0.30;
@@ -136,7 +134,7 @@ public:
 
    /*
       Stable lightweight decentralized GA-MPC.
-      GA is a fine tuner, not the dominant ring controller.
+      GA is now a fine tuner, not the dominant ring controller.
    */
    UInt32 replan_period = 80;
    UInt32 horizon = 4;
@@ -146,19 +144,8 @@ public:
    Real fit_struct = 0.60;
    Real fit_obs    = 3.20;
    Real fit_move   = 0.35;
-
-   /*
-      Reduced generic connectivity reward.
-      Increased slot reward.
-      This prevents decoys from forming their own connected cluster.
-   */
-   Real fit_conn   = 0.20;
-   Real fit_slot   = 2.20;
-
-   /*
-      Connectivity break penalty.
-   */
-   Real fit_conn_break = 2.50;
+   Real fit_conn   = 0.45;
+   Real fit_slot   = 1.10;
 
    Real mutation_rate = 0.30;
    Real mutation_scale = 0.16;
@@ -168,24 +155,15 @@ public:
 
    /*
       Mission completion thresholds.
-      Mission is complete only if the core reaches the goal
-      AND swarm quality is acceptable.
+      Mission is complete only if the core reaches the goal AND swarm quality is acceptable.
    */
    Real complete_min_lambda2_proxy = 0.1;
    Real complete_min_decoy_dist    = 0.12;
    Real complete_min_obs_dist      = 0.0;
    Real complete_min_protection    = 0.45;
 
-   /*
-      Adaptive replacement-link connectivity.
-      Exact old edges are not preserved.
-      Each agent must maintain at least k_conn local links.
-   */
-   UInt32 k_conn = 3;
-   Real k_conn_rescue = 0.120;
-
    void Init(TConfigurationNode&) override {
-      LOG << "BTP ARGoS PROTECTION-FIRST initialized: 30 swarm, slot-dominant ring, adaptive connectivity" << std::endl;
+      LOG << "BTP ARGoS STABLE-GA initialized: 30 swarm, strong protection ring, connectivity rescue" << std::endl;
 
       std::srand(7);
 
@@ -246,7 +224,6 @@ public:
           << "min_decoy_decoy,"
           << "min_obstacle_decoy,"
           << "lambda2_proxy,"
-          << "min_neighbor_count,"
           << "protection_infl_mean,"
           << "protection_decoy_mean,"
           << "struct_infl_mean,"
@@ -262,7 +239,6 @@ public:
           << "margin_combined_mean,"
           << "margin_combined_robust,"
           << "margin_combined_worst,"
-          << "formation_health,"
           << "goal_progress_score,"
           << "criticality_score,"
           << "mission_complete"
@@ -312,7 +288,7 @@ public:
       /*
          Reduced obstacle environment for 30-agent swarm.
          6 ground buildings + 3 small dynamic aerial obstacles.
-         Waypoints use wide corridors.
+         Waypoints use wide corridors to avoid choke points.
       */
       obstacles.push_back({"bld_0",  CVector3(-4.800, -4.000, 1.100), CVector3(0.600, 0.700, 1.100), false});
       obstacles.push_back({"bld_1",  CVector3(-1.300, -4.500, 1.200), CVector3(0.650, 0.550, 1.200), false});
@@ -389,7 +365,7 @@ public:
       Chromosome c;
 
       /*
-         Reduced speed range prevents overshoot and trailing clusters.
+         Reduced speed range prevents decoys from overshooting / clustering.
       */
       c.s     = RandRange(0.020, 0.055);
       c.wcent = RandRange(0.20, 1.00);
@@ -614,37 +590,6 @@ public:
       return waypoints[idx];
    }
 
-   Real FormationHealthFactor() const {
-      Real pinfl = ProtectionInfluentialMean();
-      int min_neighbors = MinNeighborCountCurrent();
-      Real min_dd = MinDecoyDistance();
-
-      Real health = 1.0;
-
-      /*
-         If protection drops, slow the influential core heavily.
-      */
-      if(pinfl < 0.55) {
-         health *= 0.35;
-      }
-
-      /*
-         If any agent has too few replacement links, slow the core.
-      */
-      if(min_neighbors < static_cast<int>(k_conn)) {
-         health *= 0.45;
-      }
-
-      /*
-         If decoys are too close, slow the core to let spacing recover.
-      */
-      if(min_dd < 0.12) {
-         health *= 0.55;
-      }
-
-      return Clamp01(health);
-   }
-
    void UpdateWaypoint() {
       if(waypoints.empty()) {
          return;
@@ -662,8 +607,8 @@ public:
       Real accept_radius = final_wp ? goal_accept_radius : wp_accept_radius;
 
       /*
-         Final mission completion requires:
-         core at goal + protection + connectivity + safety.
+         Final mission completion requires the core to enter the goal radius
+         AND swarm protection/connection/safety to be acceptable.
       */
       if(final_wp && dist < accept_radius) {
          if(IsMissionSafeToComplete()) {
@@ -681,11 +626,7 @@ public:
          return;
       }
 
-      /*
-         Intermediate waypoint switching now requires healthy protection.
-         This prevents core from leaving decoys behind.
-      */
-      if(!final_wp && dist < accept_radius && FormationHealthFactor() > 0.6) {
+      if(!final_wp && dist < accept_radius) {
          current_wp++;
          last_dist_to_wp = 1e9;
          stuck_counter = 0;
@@ -702,11 +643,7 @@ public:
 
       last_dist_to_wp = dist;
 
-      /*
-         Do not force waypoint switching if formation health is poor.
-         First let the protection ring recover.
-      */
-      if(stuck_counter > 450 && !final_wp && FormationHealthFactor() > 0.45) {
+      if(stuck_counter > 450 && !final_wp) {
          current_wp++;
          stuck_counter = 0;
          last_dist_to_wp = 1e9;
@@ -720,11 +657,9 @@ public:
       Real min_dd = MinDecoyDistance();
       Real min_od = MinObstacleDecoyDistance();
       Real pinfl  = ProtectionInfluentialMean();
-      int min_neighbors = MinNeighborCountCurrent();
 
       return
          lambda2 > complete_min_lambda2_proxy &&
-         min_neighbors >= static_cast<int>(k_conn) &&
          min_dd  > complete_min_decoy_dist &&
          min_od  > complete_min_obs_dist &&
          pinfl   > complete_min_protection;
@@ -771,7 +706,7 @@ public:
 
       initialized = true;
 
-      LOG << "Defined 4-influential + 26-decoy protection ring initialized at z="
+      LOG << "Defined 4-influential + 26-decoy ring formation initialized at z="
           << flight_z << std::endl;
    }
 
@@ -866,12 +801,6 @@ public:
       Real dist = to_target.Length();
       Real slow = std::min(1.0, dist / 1.5);
 
-      /*
-         Main new behavior:
-         core waits/slows if decoys are not protecting correctly.
-      */
-      slow *= FormationHealthFactor();
-
       for(auto& a : agents) {
          if(!a.influential) continue;
 
@@ -914,8 +843,7 @@ public:
       Real th0 = 2.0 * ARGOS_PI * static_cast<Real>(dec_idx) / ndec;
 
       /*
-         Almost no rotation.
-         Ring should translate with the core, not swirl around it.
+         No strong orbiting. Ring should translate with the core.
       */
       Real rot = 0.00005 * static_cast<Real>(step);
       Real th = th0 + rot;
@@ -947,8 +875,7 @@ public:
       CVector3 f_obs  = ObstacleForceXY(y, c.wobs);
 
       /*
-         Strong assigned-slot force.
-         This is the dominant protection-preserving force.
+         Strong assigned-slot force keeps the decoy attached to its protection slot.
       */
       CVector3 f_slot = XYOnly(slot_target - y) * k_slot_bias;
 
@@ -957,15 +884,14 @@ public:
       CVector3 f_tangent = tangent * k_tangent;
 
       /*
-         GA tunes local behavior.
-         Slot force and band force keep protection dominant.
+         GA tunes local behavior, but the ring slot is always enforced.
       */
       CVector3 f =
-         f_cent * (0.25 * c.wcent) +
+         f_cent * (0.30 * c.wcent) +
          f_sep  * c.wsep +
-         f_band * (1.10 * c.wband) +
+         f_band * (1.20 * c.wband) +
          f_obs +
-         core_target_dir * 0.006 +
+         core_target_dir * 0.010 +
          f_slot +
          f_tangent;
 
@@ -1035,55 +961,9 @@ public:
       return Clamp01(static_cast<Real>(edges) / static_cast<Real>(n * 3));
    }
 
-   int NeighborCountInPoints(const std::vector<CVector3>& pts,
-                             int self_idx,
-                             Real radius) const {
-      if(self_idx < 0 || self_idx >= static_cast<int>(pts.size())) {
-         return 0;
-      }
-
-      int count = 0;
-
-      for(int i = 0; i < static_cast<int>(pts.size()); ++i) {
-         if(i == self_idx) {
-            continue;
-         }
-
-         if(XYOnly(pts[self_idx] - pts[i]).Length() <= radius) {
-            count++;
-         }
-      }
-
-      return count;
-   }
-
-   Real CandidateConnectivityBreakPenalty(const std::vector<CVector3>& infls,
-                                          const std::vector<CVector3>& decoys,
-                                          int dec_idx) const {
-      std::vector<CVector3> pts;
-
-      for(const auto& x : infls) {
-         pts.push_back(x);
-      }
-
-      for(const auto& y : decoys) {
-         pts.push_back(y);
-      }
-
-      int self_idx = static_cast<int>(infls.size()) + dec_idx;
-      int neighbors = NeighborCountInPoints(pts, self_idx, graph_radius);
-
-      if(neighbors >= static_cast<int>(k_conn)) {
-         return 0.0;
-      }
-
-      Real missing = static_cast<Real>(k_conn) - static_cast<Real>(neighbors);
-      return missing / std::max<Real>(1.0, static_cast<Real>(k_conn));
-   }
-
    Real CandidateSlotReward(const CVector3& y, const CVector3& slot) const {
       Real d = XYOnly(y - slot).Length();
-      return std::exp(-d / 0.65);
+      return std::exp(-d / 0.8);
    }
 
    std::vector<Real> StructuralScoresFromPoints(const std::vector<CVector3>& pts) const {
@@ -1282,10 +1162,6 @@ public:
          CVector3 core = MeanPosition(infls);
          CVector3 dir = NormalizeSafeXY(target - core);
 
-         /*
-            Forecast influential motion, but it is slowed if formation is bad.
-            Approximation: horizon forecast uses normal speed.
-         */
          for(auto& x : infls) {
             CVector3 f = dir * infl_step_max;
             x = ProjectOutside(x + f);
@@ -1305,7 +1181,6 @@ public:
          Real obs_pen = CandidateObstaclePenalty(y);
          Real move_pen = v.Length() * v.Length();
          Real conn_reward = CandidateConnectivityReward(infls, decoys);
-         Real conn_break_pen = CandidateConnectivityBreakPenalty(infls, decoys, dec_idx);
          Real slot_reward = CandidateSlotReward(y, slot_target);
 
          fitness +=
@@ -1313,7 +1188,6 @@ public:
             fit_struct * struct_reward +
             fit_conn   * conn_reward +
             fit_slot   * slot_reward -
-            fit_conn_break * conn_break_pen -
             fit_obs    * obs_pen -
             fit_move   * move_pen;
       }
@@ -1419,40 +1293,30 @@ public:
          a.pos = ProjectOutside(a.pos + a.vel);
 
          /*
-            Slot rescue:
-            If a decoy drifted from its assigned ring sector, pull it back.
+            Connectivity rescue:
+            If a decoy has drifted too far from its assigned protection slot,
+            pull it back. This prevents disconnected trailing subgroups.
          */
          CVector3 to_slot = XYOnly(slot - a.pos);
          Real slot_dist = to_slot.Length();
 
-         if(slot_dist > 0.80) {
-            CVector3 rescue = LimitXY(to_slot * 0.45, 0.080);
+         if(slot_dist > 1.10) {
+            CVector3 rescue = LimitXY(to_slot * 0.35, 0.070);
             a.pos = ProjectOutside(a.pos + rescue);
             a.vel *= 0.25;
          }
 
          /*
-            Core-envelope rescue:
-            Prevent disconnected trailing subgroups.
+            Core-distance rescue:
+            If a decoy is outside the protection envelope by a large margin,
+            pull it back to the moving ring.
          */
          Real dcore = XYOnly(a.pos - core).Length();
 
-         if(dcore > rmax + 0.65) {
-            CVector3 pull = LimitXY(slot - a.pos, 0.090);
+         if(dcore > rmax + 0.85) {
+            CVector3 pull = LimitXY(slot - a.pos, 0.080);
             a.pos = ProjectOutside(a.pos + pull);
             a.vel *= 0.20;
-         }
-
-         /*
-            Adaptive replacement-link rescue:
-            If this decoy has fewer than k_conn links, reconnect it in a
-            protection-aware way. Slot/core dominate, not nearest clump.
-         */
-         int n_neighbors = NeighborCountCurrent(a.pos, a.id);
-         if(n_neighbors < static_cast<int>(k_conn)) {
-            CVector3 rescue = ConnectivityRescueForce(a.pos, a.id, slot, core);
-            a.pos = ProjectOutside(a.pos + rescue);
-            a.vel *= 0.35;
          }
 
          if(dec_idx >= 0 && dec_idx < static_cast<int>(decoys.size())) {
@@ -1652,101 +1516,6 @@ public:
       return s / static_cast<Real>(v.size());
    }
 
-   int NeighborCountCurrent(const CVector3& p,
-                            const std::string& self_id) const {
-      int count = 0;
-
-      for(const auto& b : agents) {
-         if(b.id == self_id) {
-            continue;
-         }
-
-         if(XYOnly(p - b.pos).Length() <= graph_radius) {
-            count++;
-         }
-      }
-
-      return count;
-   }
-
-   int MinNeighborCountCurrent() const {
-      if(agents.empty()) {
-         return 0;
-      }
-
-      int best = 1000000;
-
-      for(const auto& a : agents) {
-         int c = NeighborCountCurrent(a.pos, a.id);
-         if(c < best) {
-            best = c;
-         }
-      }
-
-      if(best == 1000000) {
-         return 0;
-      }
-
-      return best;
-   }
-
-   CVector3 ConnectivityRescueForce(const CVector3& p,
-                                    const std::string& self_id,
-                                    const CVector3& slot,
-                                    const CVector3& core) const {
-      std::vector<std::pair<Real, CVector3>> near_agents;
-
-      for(const auto& b : agents) {
-         if(b.id == self_id) {
-            continue;
-         }
-
-         Real d = XYOnly(p - b.pos).Length();
-         near_agents.push_back(std::make_pair(d, b.pos));
-      }
-
-      if(near_agents.empty()) {
-         return LimitXY(core - p, k_conn_rescue);
-      }
-
-      std::sort(near_agents.begin(), near_agents.end(),
-         [](const std::pair<Real, CVector3>& a,
-            const std::pair<Real, CVector3>& b) {
-            return a.first < b.first;
-         });
-
-      CVector3 neighbor_centroid(0,0,0);
-      int used = 0;
-
-      int max_use = std::min<int>(static_cast<int>(k_conn), static_cast<int>(near_agents.size()));
-
-      for(int i = 0; i < max_use; ++i) {
-         neighbor_centroid += near_agents[i].second;
-         used++;
-      }
-
-      if(used > 0) {
-         neighbor_centroid /= static_cast<Real>(used);
-      } else {
-         neighbor_centroid = core;
-      }
-
-      neighbor_centroid.SetZ(flight_z);
-
-      /*
-         Protection-aware replacement-link rescue:
-         slot and core dominate; nearest neighbors are only secondary.
-      */
-      CVector3 desired =
-         slot              * 0.60 +
-         core              * 0.25 +
-         neighbor_centroid * 0.15;
-
-      desired.SetZ(flight_z);
-
-      return LimitXY(desired - p, k_conn_rescue);
-   }
-
    Real Lambda2FastProxy() const {
       std::vector<CVector3> pts;
 
@@ -1807,8 +1576,7 @@ public:
       }
 
       /*
-         Not exact lambda2. Fast live connectivity proxy.
-         0 = disconnected. Positive = connected.
+         Not exact lambda2. This is a fast live connectivity proxy.
       */
       return deg_sum / static_cast<Real>(n);
    }
@@ -1963,7 +1731,6 @@ public:
       Real min_dd   = MinDecoyDistance();
       Real min_od   = MinObstacleDecoyDistance();
       Real lambda2  = Lambda2FastProxy();
-      int min_neighbors = MinNeighborCountCurrent();
 
       std::vector<Real> P = ProtectionDiagnosticVector();
       std::vector<Real> S = StructuralScores();
@@ -2024,7 +1791,6 @@ public:
          *std::min_element(J_infl.begin(), J_infl.end()) -
          *std::max_element(J_dec.begin(), J_dec.end());
 
-      Real formation_health = FormationHealthFactor();
       Real goal_prog = GoalProgressScore();
       Real crit = CriticalityScore(margin_combined_mean, lambda2, min_od, min_dd);
 
@@ -2040,7 +1806,6 @@ public:
              << min_dd << ","
              << min_od << ","
              << lambda2 << ","
-             << min_neighbors << ","
              << prot_infl_mean << ","
              << prot_dec_mean << ","
              << struct_infl_mean << ","
@@ -2056,7 +1821,6 @@ public:
              << margin_combined_mean << ","
              << margin_combined_robust << ","
              << margin_combined_worst << ","
-             << formation_health << ","
              << goal_prog << ","
              << crit << ","
              << (mission_complete ? 1 : 0)
@@ -2069,13 +1833,11 @@ public:
              << " min_dd=" << min_dd
              << " min_od=" << min_od
              << " lambda2_proxy=" << lambda2
-             << " min_neighbors=" << min_neighbors
              << " Pinfl=" << prot_infl_mean
              << " Pdec=" << prot_dec_mean
              << " Sinfl=" << struct_infl_mean
              << " Sdec=" << struct_dec_mean
              << " Jmargin=" << margin_combined_mean
-             << " health=" << formation_health
              << " crit=" << crit
              << " mission_complete=" << (mission_complete ? 1 : 0)
              << std::endl;
