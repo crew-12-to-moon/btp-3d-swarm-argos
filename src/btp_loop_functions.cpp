@@ -76,33 +76,42 @@ public:
    bool mission_complete   = false;
 
    /*
-      Protection band
+      Protection band.
+      Ring radius is large enough for 26 decoys without over-compression.
    */
-   Real rmin  = 0.85;
-   Real rmax  = 1.85;
-   Real rring = 1.35;
+   Real rmin  = 1.00;
+   Real rmax  = 2.10;
+   Real rring = 1.55;
    Real tau   = 0.60;
 
    /*
-      Influential motion
+      Influential motion.
+      IMPORTANT FIX:
+      influential core cohesion is strengthened so one influential cannot be left behind.
    */
    Real infl_step_max = 0.034;
 
    Real k_goal_core     = 0.065;
-   Real k_core_cohesion = 0.012;
-   Real k_infl_sep      = 0.014;
+   Real k_core_cohesion = 0.050;
+   Real k_infl_sep      = 0.020;
    Real k_obs_infl      = 0.050;
 
    /*
-      Protection-first stabilization.
-      Slot force is intentionally strong.
-      Connectivity rescue is now slot/core biased, not clump biased.
+      Influential-core rescue.
+      Prevents one influential from getting isolated due to obstacles or local forces.
    */
-   Real k_slot_bias = 0.140;
+   Real max_infl_core_dist = 0.90;
+   Real k_infl_core_rescue = 0.090;
+
+   /*
+      Protection-first stabilization.
+      Slot force is strong, but not so strong that decoys overlap in tight corridors.
+   */
+   Real k_slot_bias = 0.115;
    Real k_tangent   = 0.0005;
 
-   Real infl_sep_radius = 0.30;
-   Real dec_sep_radius  = 0.32;
+   Real infl_sep_radius = 0.38;
+   Real dec_sep_radius  = 0.42;
 
    /*
       Obstacle SDF settings
@@ -148,9 +157,8 @@ public:
    Real fit_move   = 0.35;
 
    /*
-      Reduced generic connectivity reward.
-      Increased slot reward.
-      This prevents decoys from forming their own connected cluster.
+      Generic connectivity reward is secondary.
+      Slot reward and protection reward dominate.
    */
    Real fit_conn   = 0.20;
    Real fit_slot   = 2.20;
@@ -175,6 +183,7 @@ public:
    Real complete_min_decoy_dist    = 0.12;
    Real complete_min_obs_dist      = 0.0;
    Real complete_min_protection    = 0.45;
+   Real complete_max_infl_core_dist = 1.10;
 
    /*
       Adaptive replacement-link connectivity.
@@ -185,7 +194,7 @@ public:
    Real k_conn_rescue = 0.120;
 
    void Init(TConfigurationNode&) override {
-      LOG << "BTP ARGoS PROTECTION-FIRST initialized: 30 swarm, slot-dominant ring, adaptive connectivity" << std::endl;
+      LOG << "BTP ARGoS ANTI-STALL initialized: 30 swarm, protected decoy ring, core-lock with minimum progress" << std::endl;
 
       std::srand(7);
 
@@ -242,6 +251,7 @@ public:
           << "core_z,"
           << "dist_wp,"
           << "dist_goal,"
+          << "max_infl_core_dist,"
           << "avg_band_error,"
           << "min_decoy_decoy,"
           << "min_obstacle_decoy,"
@@ -354,12 +364,12 @@ public:
 
       /*
          Long route through reduced obstacle field.
-         Waypoints are placed in wide corridors.
+         Waypoint 3 is shifted left to avoid squeezing the full ring through the central gap.
       */
       waypoints.push_back(CVector3(-7.000, -7.000, 1.500));
       waypoints.push_back(CVector3(-6.800, -3.000, 1.500));
       waypoints.push_back(CVector3(-4.000, -1.200, 1.500));
-      waypoints.push_back(CVector3(-4.200,  2.800, 1.500));
+      waypoints.push_back(CVector3(-5.300,  2.600, 1.500));
       waypoints.push_back(CVector3(-1.000,  4.500, 1.500));
       waypoints.push_back(CVector3( 2.500,  3.200, 1.500));
       waypoints.push_back(CVector3( 5.000,  5.500, 1.500));
@@ -390,10 +400,11 @@ public:
 
       /*
          Reduced speed range prevents overshoot and trailing clusters.
+         Separation range is increased because 26 decoys need more spacing authority.
       */
       c.s     = RandRange(0.020, 0.055);
       c.wcent = RandRange(0.20, 1.00);
-      c.wsep  = RandRange(1.60, 4.20);
+      c.wsep  = RandRange(2.80, 6.00);
       c.wband = RandRange(1.60, 4.00);
       c.wobs  = RandRange(1.10, 3.20);
       c.fitness = -1e9;
@@ -415,7 +426,7 @@ public:
 
       c.s     = mutate_scalar(c.s,     0.018, 0.060);
       c.wcent = mutate_scalar(c.wcent, 0.100, 1.300);
-      c.wsep  = mutate_scalar(c.wsep,  1.000, 5.000);
+      c.wsep  = mutate_scalar(c.wsep,  2.000, 7.000);
       c.wband = mutate_scalar(c.wband, 1.000, 5.000);
       c.wobs  = mutate_scalar(c.wobs,  0.700, 4.000);
       c.fitness = -1e9;
@@ -605,6 +616,19 @@ public:
       return c;
    }
 
+   Real MaxInfluentialDistanceFromCore() const {
+      CVector3 core = CoreCentroid();
+      Real worst = 0.0;
+
+      for(const auto& a : agents) {
+         if(a.influential) {
+            worst = std::max(worst, XYOnly(a.pos - core).Length());
+         }
+      }
+
+      return worst;
+   }
+
    CVector3 CurrentTarget() const {
       if(waypoints.empty()) {
          return goal;
@@ -618,31 +642,42 @@ public:
       Real pinfl = ProtectionInfluentialMean();
       int min_neighbors = MinNeighborCountCurrent();
       Real min_dd = MinDecoyDistance();
+      Real max_infl_dist = MaxInfluentialDistanceFromCore();
 
       Real health = 1.0;
 
       /*
-         If protection drops, slow the influential core heavily.
+         Do not collapse health too aggressively.
+         Earlier core-lock version could deadlock/stall because the core slowed too much.
       */
-      if(pinfl < 0.55) {
-         health *= 0.35;
+      if(pinfl < 0.45) {
+         health *= 0.65;
+      } else if(pinfl < 0.55) {
+         health *= 0.80;
       }
 
-      /*
-         If any agent has too few replacement links, slow the core.
-      */
       if(min_neighbors < static_cast<int>(k_conn)) {
-         health *= 0.45;
+         health *= 0.75;
+      }
+
+      if(min_dd < 0.08) {
+         health *= 0.65;
+      } else if(min_dd < 0.14) {
+         health *= 0.80;
+      }
+
+      if(max_infl_dist > 1.10) {
+         health *= 0.60;
+      } else if(max_infl_dist > max_infl_core_dist) {
+         health *= 0.80;
       }
 
       /*
-         If decoys are too close, slow the core to let spacing recover.
+         Critical anti-stall fix:
+         Never let formation health collapse to near zero.
+         The swarm must keep moving enough to escape bad obstacle geometry.
       */
-      if(min_dd < 0.12) {
-         health *= 0.55;
-      }
-
-      return Clamp01(health);
+      return std::max<Real>(0.35, Clamp01(health));
    }
 
    void UpdateWaypoint() {
@@ -660,10 +695,11 @@ public:
       Real dist = XYOnly(target - core).Length();
       bool final_wp = (current_wp >= waypoints.size() - 1);
       Real accept_radius = final_wp ? goal_accept_radius : wp_accept_radius;
+      Real max_infl_dist = MaxInfluentialDistanceFromCore();
 
       /*
          Final mission completion requires:
-         core at goal + protection + connectivity + safety.
+         core at goal + protection + connectivity + safety + all influentials with core.
       */
       if(final_wp && dist < accept_radius) {
          if(IsMissionSafeToComplete()) {
@@ -682,10 +718,15 @@ public:
       }
 
       /*
-         Intermediate waypoint switching now requires healthy protection.
-         This prevents core from leaving decoys behind.
+         Intermediate waypoint switching now requires:
+         - centroid near waypoint
+         - decoy protection healthy
+         - no isolated influential
       */
-      if(!final_wp && dist < accept_radius && FormationHealthFactor() > 0.6) {
+      if(!final_wp &&
+         dist < accept_radius &&
+         FormationHealthFactor() > 0.30 &&
+         max_infl_dist < 1.20) {
          current_wp++;
          last_dist_to_wp = 1e9;
          stuck_counter = 0;
@@ -704,9 +745,9 @@ public:
 
       /*
          Do not force waypoint switching if formation health is poor.
-         First let the protection ring recover.
+         First let the protection ring and influential core recover.
       */
-      if(stuck_counter > 450 && !final_wp && FormationHealthFactor() > 0.45) {
+      if(stuck_counter > 350 && !final_wp) {
          current_wp++;
          stuck_counter = 0;
          last_dist_to_wp = 1e9;
@@ -721,21 +762,26 @@ public:
       Real min_od = MinObstacleDecoyDistance();
       Real pinfl  = ProtectionInfluentialMean();
       int min_neighbors = MinNeighborCountCurrent();
+      Real max_infl_dist = MaxInfluentialDistanceFromCore();
 
       return
          lambda2 > complete_min_lambda2_proxy &&
          min_neighbors >= static_cast<int>(k_conn) &&
          min_dd  > complete_min_decoy_dist &&
          min_od  > complete_min_obs_dist &&
-         pinfl   > complete_min_protection;
+         pinfl   > complete_min_protection &&
+         max_infl_dist < complete_max_infl_core_dist;
    }
 
    void InitDefinedFormation() {
+      /*
+         4 influential agents in a compact diamond-like core.
+      */
       std::vector<CVector3> core_offsets = {
          CVector3( 0.00,  0.00, 0.00),
-         CVector3( 0.28,  0.00, 0.00),
-         CVector3(-0.28,  0.00, 0.00),
-         CVector3( 0.00,  0.28, 0.00)
+         CVector3( 0.30,  0.00, 0.00),
+         CVector3(-0.30,  0.00, 0.00),
+         CVector3( 0.00,  0.30, 0.00)
       };
 
       int i = 0;
@@ -867,8 +913,9 @@ public:
       Real slow = std::min(1.0, dist / 1.5);
 
       /*
-         Main new behavior:
-         core waits/slows if decoys are not protecting correctly.
+         Main behavior:
+         core waits/slows if decoys are not protecting correctly
+         or if one influential is separating from the core.
       */
       slow *= FormationHealthFactor();
 
@@ -884,6 +931,19 @@ public:
 
          a.vel = LimitXY(f, infl_step_max);
          a.pos = ProjectOutside(a.pos + a.vel);
+
+         /*
+            NEW:
+            Influential-core rescue.
+            If any influential drifts too far from the core, pull it back.
+         */
+         Real dcore = XYOnly(a.pos - core).Length();
+
+         if(dcore > max_infl_core_dist) {
+            CVector3 rescue = LimitXY(core - a.pos, k_infl_core_rescue);
+            a.pos = ProjectOutside(a.pos + rescue);
+            a.vel *= 0.25;
+         }
       }
    }
 
@@ -1283,8 +1343,7 @@ public:
          CVector3 dir = NormalizeSafeXY(target - core);
 
          /*
-            Forecast influential motion, but it is slowed if formation is bad.
-            Approximation: horizon forecast uses normal speed.
+            Forecast influential motion.
          */
          for(auto& x : infls) {
             CVector3 f = dir * infl_step_max;
@@ -1425,8 +1484,8 @@ public:
          CVector3 to_slot = XYOnly(slot - a.pos);
          Real slot_dist = to_slot.Length();
 
-         if(slot_dist > 0.80) {
-            CVector3 rescue = LimitXY(to_slot * 0.45, 0.080);
+         if(slot_dist > 0.95) {
+            CVector3 rescue = LimitXY(to_slot * 0.40, 0.080);
             a.pos = ProjectOutside(a.pos + rescue);
             a.vel *= 0.25;
          }
@@ -1890,18 +1949,21 @@ public:
    Real CriticalityScore(Real combined_margin_mean,
                          Real lambda2,
                          Real min_od,
-                         Real min_dd) const {
+                         Real min_dd,
+                         Real max_infl_dist) const {
       Real margin_score = Clamp01(0.5 + 0.5 * combined_margin_mean);
       Real conn_score = Clamp01(lambda2 / 20.0);
       Real obs_score = Clamp01(min_od / 0.80);
       Real sep_score = Clamp01(min_dd / 0.22);
+      Real infl_core_score = Clamp01(1.0 - max_infl_dist / 1.25);
       Real goal_score = GoalProgressScore();
 
       return Clamp01(
-         0.35 * margin_score +
-         0.20 * conn_score +
-         0.20 * obs_score +
-         0.15 * sep_score +
+         0.30 * margin_score +
+         0.18 * conn_score +
+         0.18 * obs_score +
+         0.14 * sep_score +
+         0.10 * infl_core_score +
          0.10 * goal_score
       );
    }
@@ -1958,6 +2020,7 @@ public:
 
       Real dist_wp   = XYOnly(target - core).Length();
       Real dist_goal = XYOnly(goal - core).Length();
+      Real max_infl_dist = MaxInfluentialDistanceFromCore();
 
       Real band_err = AvgBandError();
       Real min_dd   = MinDecoyDistance();
@@ -2026,7 +2089,7 @@ public:
 
       Real formation_health = FormationHealthFactor();
       Real goal_prog = GoalProgressScore();
-      Real crit = CriticalityScore(margin_combined_mean, lambda2, min_od, min_dd);
+      Real crit = CriticalityScore(margin_combined_mean, lambda2, min_od, min_dd, max_infl_dist);
 
       if(!terminal) {
          csv << step << ","
@@ -2036,6 +2099,7 @@ public:
              << core.GetZ() << ","
              << dist_wp << ","
              << dist_goal << ","
+             << max_infl_dist << ","
              << band_err << ","
              << min_dd << ","
              << min_od << ","
@@ -2066,6 +2130,7 @@ public:
              << " wp=" << current_wp
              << " core=(" << core.GetX() << "," << core.GetY() << "," << core.GetZ() << ")"
              << " dist_goal=" << dist_goal
+             << " max_infl_core_dist=" << max_infl_dist
              << " min_dd=" << min_dd
              << " min_od=" << min_od
              << " lambda2_proxy=" << lambda2
