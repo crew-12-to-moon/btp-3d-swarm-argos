@@ -2,7 +2,7 @@
 <argos-configuration>
   <framework>
     <system threads="0"/>
-    <experiment length="4500" ticks_per_second="10" random_seed="5"/>
+    <experiment length="4500" ticks_per_second="10" random_seed="4"/>
   </framework>
   <physics_engines>
     <dynamics3d id="dyn3d"/>
@@ -116,7 +116,7 @@
     </prototype>
 
     <prototype id="infl_3" movable="true">
-      <body position="-7.000,-6.700,1.500"/>
+      <body position="-5.800,-7.500,1.500"/>
       <controller config="infl"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.15" radius="0.065"/>
@@ -332,17 +332,4 @@
     </prototype>
 
   </arena>
-
-    <visualization>
-    <qt-opengl>
-      <camera>
-        <placement idx="0"
-                   position="0,-18,14"
-                   look_at="0,0,1.5"
-                   up="0,0,1"
-                   lens_focal_length="35"/>
-      </camera>
-    </qt-opengl>
-  </visualization>
-  
 </argos-configuration>

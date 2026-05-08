@@ -22,26 +22,7 @@ struct Chromosome {
    Real wsep   = 2.20;
    Real wband  = 2.80;
    Real wobs   = 1.60;
-
-   /*
-      Step-1 GA update:
-      scalar fitness is retained only as a tie-break / reward value.
-      Selection is now based on priority-threshold violations first,
-      then Pareto rank + crowding distance when thresholds are satisfied.
-   */
    Real fitness = -1e9;
-
-   Real q1_protection = 0.0;  // maximize: Pinfl + Popt_decoy
-   Real q2_structure  = 0.0;  // maximize: mean influential structural score
-   Real q3_obstacle   = 0.0;  // minimize: obstacle penalty
-   Real q4_motion     = 0.0;  // minimize: motion penalty
-
-   Real V1_safety     = 0.0;  // priority 1: obstacle violation
-   Real V2_task       = 0.0;  // priority 2: protection/structure violation
-   Real V3_motion     = 0.0;  // priority 3: motion violation
-
-   UInt32 pareto_rank = 999999;
-   Real crowding_distance = 0.0;
 };
 
 struct Agent {
@@ -190,20 +171,6 @@ public:
    Real mutation_rate = 0.30;
    Real mutation_scale = 0.16;
 
-   /*
-      Step-1 GA update from updated report:
-      q(chi) = [q1, q2, q3, q4]
-      q1 = protection reward, q2 = influential structural reward,
-      q3 = obstacle penalty, q4 = motion penalty.
-
-      T = [Pmin, Smin, Omax, Mmax].
-      q1 and q2 are maximized; q3 and q4 are minimized.
-   */
-   Real ga_Pmin = 1.00;    // q1 = Pinfl + Popt_decoy, range roughly 0..2
-   Real ga_Smin = 0.35;    // mean influential structural score threshold
-   Real ga_Omax = 0.15;    // average obstacle penalty threshold
-   Real ga_Mmax = 0.0045;  // average squared motion threshold
-
    UInt32 csv_log_period = 25;
    UInt32 terminal_log_period = 100;
 
@@ -227,7 +194,7 @@ public:
    Real k_conn_rescue = 0.120;
 
    void Init(TConfigurationNode&) override {
-      LOG << "BTP ARGoS STEP-1 PRIORITY-GA initialized: prioritized decentralized GA, protected decoy ring" << std::endl;
+      LOG << "BTP ARGoS ANTI-STALL initialized: 30 swarm, protected decoy ring, core-lock with minimum progress" << std::endl;
 
       std::srand(7);
 
@@ -1353,222 +1320,19 @@ public:
       return sum / static_cast<Real>(count);
    }
 
-   Real ProtectionInfluentialMeanFromPoints(const std::vector<CVector3>& infls,
-                                             const std::vector<CVector3>& decoys) const {
-      if(infls.empty() || decoys.empty()) {
-         return 0.0;
-      }
-
-      Real total = 0.0;
-
-      for(const auto& x : infls) {
-         Real sumB = 0.0;
-         std::vector<Real> angles;
-
-         for(const auto& y : decoys) {
-            CVector3 r = XYOnly(y - x);
-            Real d = r.Length();
-
-            sumB += BandMembership(d);
-            angles.push_back(std::atan2(r.GetY(), r.GetX()));
-         }
-
-         Real meanB = sumB / static_cast<Real>(decoys.size());
-         Real gamma = AngularUniformity(angles);
-
-         total += 0.8 * meanB + 0.2 * gamma;
-      }
-
-      return total / static_cast<Real>(infls.size());
-   }
-
-   Real ViolateMaximize(Real q, Real threshold) const {
-      return std::max<Real>(0.0, threshold - q);
-   }
-
-   Real ViolateMinimize(Real q, Real threshold) const {
-      return std::max<Real>(0.0, q - threshold);
-   }
-
-   bool HasPriorityViolation(const Chromosome& c) const {
-      const Real eps = 1e-9;
-      return (c.V1_safety > eps || c.V2_task > eps || c.V3_motion > eps);
-   }
-
-   /*
-      Priority comparator from the updated report:
-      If constraints are violated, candidates are compared lexicographically
-      by priority-level violations V1, V2, V3.
-      If all thresholds are satisfied, candidates are compared by Pareto rank
-      and crowding distance, with scalar fitness only as a final tie-break.
-   */
-   bool BetterChromosome(const Chromosome& a, const Chromosome& b) const {
-      bool av = HasPriorityViolation(a);
-      bool bv = HasPriorityViolation(b);
-      const Real eps = 1e-9;
-
-      if(av || bv) {
-         if(std::fabs(a.V1_safety - b.V1_safety) > eps) {
-            return a.V1_safety < b.V1_safety;
-         }
-         if(std::fabs(a.V2_task - b.V2_task) > eps) {
-            return a.V2_task < b.V2_task;
-         }
-         if(std::fabs(a.V3_motion - b.V3_motion) > eps) {
-            return a.V3_motion < b.V3_motion;
-         }
-         return a.fitness > b.fitness;
-      }
-
-      if(a.pareto_rank != b.pareto_rank) {
-         return a.pareto_rank < b.pareto_rank;
-      }
-
-      if(std::fabs(a.crowding_distance - b.crowding_distance) > eps) {
-         return a.crowding_distance > b.crowding_distance;
-      }
-
-      return a.fitness > b.fitness;
-   }
-
-   bool Dominates(const Chromosome& a, const Chromosome& b) const {
-      bool no_worse =
-         a.q1_protection >= b.q1_protection &&
-         a.q2_structure  >= b.q2_structure  &&
-         a.q3_obstacle   <= b.q3_obstacle   &&
-         a.q4_motion     <= b.q4_motion;
-
-      bool strictly_better =
-         a.q1_protection > b.q1_protection ||
-         a.q2_structure  > b.q2_structure  ||
-         a.q3_obstacle   < b.q3_obstacle   ||
-         a.q4_motion     < b.q4_motion;
-
-      return no_worse && strictly_better;
-   }
-
-   Real ObjectiveValue(const Chromosome& c, int obj) const {
-      if(obj == 0) return c.q1_protection;
-      if(obj == 1) return c.q2_structure;
-      if(obj == 2) return c.q3_obstacle;
-      return c.q4_motion;
-   }
-
-   void ComputeParetoRankAndCrowding(std::vector<Chromosome>& pop) const {
-      const int N = static_cast<int>(pop.size());
-      if(N == 0) {
-         return;
-      }
-
-      std::vector<std::vector<int>> dominates_set(N);
-      std::vector<int> domination_count(N, 0);
-      std::vector<std::vector<int>> fronts;
-
-      for(int i = 0; i < N; ++i) {
-         pop[i].pareto_rank = 999999;
-         pop[i].crowding_distance = 0.0;
-
-         for(int j = 0; j < N; ++j) {
-            if(i == j) continue;
-
-            if(Dominates(pop[i], pop[j])) {
-               dominates_set[i].push_back(j);
-            } else if(Dominates(pop[j], pop[i])) {
-               domination_count[i]++;
-            }
-         }
-
-         if(domination_count[i] == 0) {
-            pop[i].pareto_rank = 0;
-         }
-      }
-
-      std::vector<int> current;
-      for(int i = 0; i < N; ++i) {
-         if(pop[i].pareto_rank == 0) {
-            current.push_back(i);
-         }
-      }
-
-      UInt32 rank = 0;
-      while(!current.empty()) {
-         fronts.push_back(current);
-         std::vector<int> next;
-
-         for(int i : current) {
-            for(int j : dominates_set[i]) {
-               domination_count[j]--;
-               if(domination_count[j] == 0) {
-                  pop[j].pareto_rank = rank + 1;
-                  next.push_back(j);
-               }
-            }
-         }
-
-         current = next;
-         rank++;
-      }
-
-      /*
-         Crowding distance for each front, NSGA-II style.
-         q1 and q2 are maximize objectives; q3 and q4 are minimize objectives.
-         For crowding distance, the ordering direction does not matter because
-         only spread along each objective axis is needed.
-      */
-      for(const auto& front : fronts) {
-         if(front.empty()) continue;
-
-         if(front.size() <= 2) {
-            for(int idx : front) {
-               pop[idx].crowding_distance = 1e9;
-            }
-            continue;
-         }
-
-         for(int obj = 0; obj < 4; ++obj) {
-            std::vector<int> sorted = front;
-
-            std::sort(sorted.begin(), sorted.end(),
-               [&](int a, int b) {
-                  return ObjectiveValue(pop[a], obj) < ObjectiveValue(pop[b], obj);
-               });
-
-            Real fmin = ObjectiveValue(pop[sorted.front()], obj);
-            Real fmax = ObjectiveValue(pop[sorted.back()], obj);
-            Real denom = std::max<Real>(fmax - fmin, 1e-9);
-
-            pop[sorted.front()].crowding_distance += 1e9;
-            pop[sorted.back()].crowding_distance += 1e9;
-
-            for(size_t k = 1; k + 1 < sorted.size(); ++k) {
-               Real prev = ObjectiveValue(pop[sorted[k - 1]], obj);
-               Real next = ObjectiveValue(pop[sorted[k + 1]], obj);
-               pop[sorted[k]].crowding_distance += (next - prev) / denom;
-            }
-         }
-      }
-   }
-
-   Chromosome EvaluateChromosomePriority(int dec_idx,
-                                         const CVector3& y0,
-                                         const CVector3& v0,
-                                         const Chromosome& base,
-                                         const std::vector<CVector3>& infls0,
-                                         const std::vector<CVector3>& decoys0) const {
-      Chromosome c = base;
-
+   Real EvaluateChromosome(int dec_idx,
+                           const CVector3& y0,
+                           const CVector3& v0,
+                           const Chromosome& c,
+                           const std::vector<CVector3>& infls0,
+                           const std::vector<CVector3>& decoys0) const {
       std::vector<CVector3> infls = infls0;
       std::vector<CVector3> decoys = decoys0;
 
       CVector3 y = y0;
       CVector3 v = v0;
 
-      Real q1_sum = 0.0;
-      Real q2_sum = 0.0;
-      Real q3_sum = 0.0;
-      Real q4_sum = 0.0;
-
-      Real reward_sum = 0.0;
+      Real fitness = 0.0;
 
       CVector3 target = CurrentTarget();
       CVector3 core0 = MeanPosition(infls);
@@ -1595,87 +1359,25 @@ public:
             decoys[dec_idx] = y;
          }
 
-         Real pinfl_reward = ProtectionInfluentialMeanFromPoints(infls, decoys);
-         Real popt_decoy = CandidateProtectionReward(y, infls);
-
-         /*
-            q1 from updated report:
-            k = P_infl + Popt_decoy.
-            This rewards both global influential protection and the candidate
-            decoy's own placement relative to the protection band.
-         */
-         Real q1 = pinfl_reward + popt_decoy;
-         Real q2 = MeanInfluentialStructuralScore(infls, decoys);
-         Real q3 = CandidateObstaclePenalty(y);
-         Real q4 = v.Length() * v.Length();
-
+         Real prot_reward = CandidateProtectionReward(y, infls);
+         Real struct_reward = MeanInfluentialStructuralScore(infls, decoys);
+         Real obs_pen = CandidateObstaclePenalty(y);
+         Real move_pen = v.Length() * v.Length();
          Real conn_reward = CandidateConnectivityReward(infls, decoys);
          Real conn_break_pen = CandidateConnectivityBreakPenalty(infls, decoys, dec_idx);
          Real slot_reward = CandidateSlotReward(y, slot_target);
 
-         /*
-            Scalar reward is not the main selector anymore.
-            It is kept for tie-breaking and for continuity with earlier logs.
-         */
-         Real reward =
-            fit_prot   * q1 +
-            fit_struct * q2 +
+         fitness +=
+            fit_prot   * prot_reward +
+            fit_struct * struct_reward +
             fit_conn   * conn_reward +
             fit_slot   * slot_reward -
             fit_conn_break * conn_break_pen -
-            fit_obs    * q3 -
-            fit_move   * q4;
-
-         q1_sum += q1;
-         q2_sum += q2;
-         q3_sum += q3;
-         q4_sum += q4;
-         reward_sum += reward;
+            fit_obs    * obs_pen -
+            fit_move   * move_pen;
       }
 
-      Real H = static_cast<Real>(std::max<UInt32>(1, horizon));
-
-      c.q1_protection = q1_sum / H;
-      c.q2_structure  = q2_sum / H;
-      c.q3_obstacle   = q3_sum / H;
-      c.q4_motion     = q4_sum / H;
-      c.fitness       = reward_sum / H;
-
-      /*
-         Threshold violations:
-         q1 and q2 are maximize objectives.
-         q3 and q4 are minimize objectives.
-
-         Priority levels:
-         V1 = obstacle safety
-         V2 = protection + influential structural organization
-         V3 = smooth motion
-      */
-      Real v1 = ViolateMinimize(c.q3_obstacle, ga_Omax);
-      Real v2a = ViolateMaximize(c.q1_protection, ga_Pmin);
-      Real v2b = ViolateMaximize(c.q2_structure, ga_Smin);
-      Real v3 = ViolateMinimize(c.q4_motion, ga_Mmax);
-
-      c.V1_safety = v1;
-      c.V2_task   = std::max(v2a, v2b);
-      c.V3_motion = v3;
-
-      return c;
-   }
-
-   int TournamentSelectIndex(const std::vector<Chromosome>& pop) const {
-      if(pop.empty()) {
-         return 0;
-      }
-
-      int i = std::rand() % pop.size();
-      int j = std::rand() % pop.size();
-
-      if(BetterChromosome(pop[i], pop[j])) {
-         return i;
-      }
-
-      return j;
+      return fitness / static_cast<Real>(std::max<UInt32>(1, horizon));
    }
 
    void ReplanAllDecoys() {
@@ -1703,14 +1405,12 @@ public:
          }
 
          for(auto& c : a.population) {
-            c = EvaluateChromosomePriority(dec_idx, a.pos, a.vel, c, infls, decoys);
+            c.fitness = EvaluateChromosome(dec_idx, a.pos, a.vel, c, infls, decoys);
          }
 
-         ComputeParetoRankAndCrowding(a.population);
-
          std::sort(a.population.begin(), a.population.end(),
-            [this](const Chromosome& p, const Chromosome& q) {
-               return BetterChromosome(p, q);
+            [](const Chromosome& p, const Chromosome& q) {
+               return p.fitness > q.fitness;
             });
 
          if(!a.population.empty()) {
@@ -1719,22 +1419,14 @@ public:
 
          std::vector<Chromosome> next;
 
-         /*
-            Elitism: keep best candidate according to priority/Pareto comparator.
-         */
          if(a.population.size() >= 1) {
             next.push_back(a.population[0]);
          }
 
-         /*
-            Tournament selection now uses the same priority/Pareto comparator.
-         */
          while(next.size() < population_size) {
-            int i1 = TournamentSelectIndex(a.population);
-            int i2 = TournamentSelectIndex(a.population);
-
-            const Chromosome& p1 = a.population[i1];
-            const Chromosome& p2 = a.population[i2];
+            size_t pool = std::min<size_t>(2, a.population.size());
+            const Chromosome& p1 = a.population[std::rand() % pool];
+            const Chromosome& p2 = a.population[std::rand() % pool];
 
             Chromosome child = Crossover(p1, p2);
             child = MutateChromosome(child);

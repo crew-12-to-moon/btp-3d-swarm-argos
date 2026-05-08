@@ -2,7 +2,7 @@
 <argos-configuration>
   <framework>
     <system threads="0"/>
-    <experiment length="4500" ticks_per_second="10" random_seed="5"/>
+    <experiment length="4500" ticks_per_second="10" random_seed="4"/>
   </framework>
   <physics_engines>
     <dynamics3d id="dyn3d"/>
@@ -53,6 +53,34 @@
       <body position="4.800,4.200,1.200"/>
       <links ref="b">
         <link id="b" geometry="box" mass="10.0" size="1.300,1.400,2.400"/>
+      </links>
+    </prototype>
+
+    <prototype id="bld_6" movable="false">
+      <body position="-6.800,3.800,1.200"/>
+      <links ref="b">
+        <link id="b" geometry="box" mass="10.0" size="1.200,1.200,2.400"/>
+      </links>
+    </prototype>
+
+    <prototype id="bld_7" movable="false">
+      <body position="0.200,4.700,1.400"/>
+      <links ref="b">
+        <link id="b" geometry="box" mass="10.0" size="1.300,1.200,2.800"/>
+      </links>
+    </prototype>
+
+    <prototype id="bld_8" movable="false">
+      <body position="5.800,0.800,1.300"/>
+      <links ref="b">
+        <link id="b" geometry="box" mass="10.0" size="1.200,1.400,2.600"/>
+      </links>
+    </prototype>
+
+    <prototype id="bld_9" movable="false">
+      <body position="1.000,-6.200,1.100"/>
+      <links ref="b">
+        <link id="b" geometry="box" mass="10.0" size="1.200,1.200,2.200"/>
       </links>
     </prototype>
 
@@ -332,17 +360,4 @@
     </prototype>
 
   </arena>
-
-    <visualization>
-    <qt-opengl>
-      <camera>
-        <placement idx="0"
-                   position="0,-18,14"
-                   look_at="0,0,1.5"
-                   up="0,0,1"
-                   lens_focal_length="35"/>
-      </camera>
-    </qt-opengl>
-  </visualization>
-  
 </argos-configuration>

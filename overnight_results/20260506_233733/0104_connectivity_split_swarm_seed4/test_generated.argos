@@ -2,7 +2,7 @@
 <argos-configuration>
   <framework>
     <system threads="0"/>
-    <experiment length="4500" ticks_per_second="10" random_seed="5"/>
+    <experiment length="4500" ticks_per_second="10" random_seed="4"/>
   </framework>
   <physics_engines>
     <dynamics3d id="dyn3d"/>
@@ -124,7 +124,7 @@
     </prototype>
 
     <prototype id="dec_0" movable="true">
-      <body position="-5.450,-7.000,1.500"/>
+      <body position="-8.050,-7.800,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -132,7 +132,7 @@
     </prototype>
 
     <prototype id="dec_1" movable="true">
-      <body position="-5.495,-6.629,1.500"/>
+      <body position="-8.136,-7.451,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -140,7 +140,7 @@
     </prototype>
 
     <prototype id="dec_2" movable="true">
-      <body position="-5.628,-6.280,1.500"/>
+      <body position="-8.374,-7.183,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -148,7 +148,7 @@
     </prototype>
 
     <prototype id="dec_3" movable="true">
-      <body position="-5.840,-5.972,1.500"/>
+      <body position="-8.710,-7.055,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -156,7 +156,7 @@
     </prototype>
 
     <prototype id="dec_4" movable="true">
-      <body position="-6.119,-5.724,1.500"/>
+      <body position="-9.066,-7.099,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -164,7 +164,7 @@
     </prototype>
 
     <prototype id="dec_5" movable="true">
-      <body position="-6.450,-5.551,1.500"/>
+      <body position="-9.361,-7.303,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -172,7 +172,7 @@
     </prototype>
 
     <prototype id="dec_6" movable="true">
-      <body position="-6.813,-5.461,1.500"/>
+      <body position="-9.528,-7.621,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -180,7 +180,7 @@
     </prototype>
 
     <prototype id="dec_7" movable="true">
-      <body position="-7.187,-5.461,1.500"/>
+      <body position="-9.528,-7.979,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -188,7 +188,7 @@
     </prototype>
 
     <prototype id="dec_8" movable="true">
-      <body position="-7.550,-5.551,1.500"/>
+      <body position="-9.361,-8.297,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -196,7 +196,7 @@
     </prototype>
 
     <prototype id="dec_9" movable="true">
-      <body position="-7.881,-5.724,1.500"/>
+      <body position="-9.066,-8.501,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -204,7 +204,7 @@
     </prototype>
 
     <prototype id="dec_10" movable="true">
-      <body position="-8.160,-5.972,1.500"/>
+      <body position="-8.710,-8.545,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -212,7 +212,7 @@
     </prototype>
 
     <prototype id="dec_11" movable="true">
-      <body position="-8.372,-6.280,1.500"/>
+      <body position="-8.374,-8.417,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -220,7 +220,7 @@
     </prototype>
 
     <prototype id="dec_12" movable="true">
-      <body position="-8.505,-6.629,1.500"/>
+      <body position="-8.136,-8.149,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -228,7 +228,7 @@
     </prototype>
 
     <prototype id="dec_13" movable="true">
-      <body position="-8.550,-7.000,1.500"/>
+      <body position="-4.450,-6.200,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -236,7 +236,7 @@
     </prototype>
 
     <prototype id="dec_14" movable="true">
-      <body position="-8.505,-7.371,1.500"/>
+      <body position="-4.536,-5.851,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -244,7 +244,7 @@
     </prototype>
 
     <prototype id="dec_15" movable="true">
-      <body position="-8.372,-7.720,1.500"/>
+      <body position="-4.774,-5.583,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -252,7 +252,7 @@
     </prototype>
 
     <prototype id="dec_16" movable="true">
-      <body position="-8.160,-8.028,1.500"/>
+      <body position="-5.110,-5.455,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -260,7 +260,7 @@
     </prototype>
 
     <prototype id="dec_17" movable="true">
-      <body position="-7.881,-8.276,1.500"/>
+      <body position="-5.466,-5.499,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -268,7 +268,7 @@
     </prototype>
 
     <prototype id="dec_18" movable="true">
-      <body position="-7.550,-8.449,1.500"/>
+      <body position="-5.761,-5.703,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -276,7 +276,7 @@
     </prototype>
 
     <prototype id="dec_19" movable="true">
-      <body position="-7.187,-8.539,1.500"/>
+      <body position="-5.928,-6.021,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -284,7 +284,7 @@
     </prototype>
 
     <prototype id="dec_20" movable="true">
-      <body position="-6.813,-8.539,1.500"/>
+      <body position="-5.928,-6.379,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -292,7 +292,7 @@
     </prototype>
 
     <prototype id="dec_21" movable="true">
-      <body position="-6.450,-8.449,1.500"/>
+      <body position="-5.761,-6.697,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -300,7 +300,7 @@
     </prototype>
 
     <prototype id="dec_22" movable="true">
-      <body position="-6.119,-8.276,1.500"/>
+      <body position="-5.466,-6.901,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -308,7 +308,7 @@
     </prototype>
 
     <prototype id="dec_23" movable="true">
-      <body position="-5.840,-8.028,1.500"/>
+      <body position="-5.110,-6.945,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -316,7 +316,7 @@
     </prototype>
 
     <prototype id="dec_24" movable="true">
-      <body position="-5.628,-7.720,1.500"/>
+      <body position="-4.774,-6.817,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -324,7 +324,7 @@
     </prototype>
 
     <prototype id="dec_25" movable="true">
-      <body position="-5.495,-7.371,1.500"/>
+      <body position="-4.536,-6.549,1.500"/>
       <controller config="dec"/>
       <links ref="b">
         <link id="b" geometry="sphere" mass="0.06" radius="0.035"/>
@@ -332,17 +332,4 @@
     </prototype>
 
   </arena>
-
-    <visualization>
-    <qt-opengl>
-      <camera>
-        <placement idx="0"
-                   position="0,-18,14"
-                   look_at="0,0,1.5"
-                   up="0,0,1"
-                   lens_focal_length="35"/>
-      </camera>
-    </qt-opengl>
-  </visualization>
-  
 </argos-configuration>
