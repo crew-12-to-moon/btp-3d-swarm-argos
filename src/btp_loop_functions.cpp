@@ -224,6 +224,8 @@ public:
    UInt32 csv_log_period = 25;
    UInt32 terminal_log_period = 100;
 
+   UInt32 weak_connectivity_steps = 0;
+
    /*
       Mission completion thresholds.
       Mission is complete only if the core reaches the goal
@@ -241,7 +243,7 @@ public:
       Each agent must maintain at least k_conn local links.
    */
    UInt32 k_conn = 3;
-   Real k_conn_rescue = 0.120;
+   Real k_conn_rescue = 0.150;
 
    /*
       Step-3 connectivity repair.
@@ -252,7 +254,7 @@ public:
    Real bridge_soft_margin = 0.85;
 
    void Init(TConfigurationNode&) override {
-      LOG << "BTP ARGoS STEP-3 CONNECTIVITY initialized: priority GA + 3D shell + component bridge repair" << std::endl;
+      LOG << "BTP ARGoS STEP-3.2 LOCAL-K-CONNECTIVITY initialized: priority GA + 3D shell + component bridge repair" << std::endl;
 
       std::srand(7);
 
@@ -278,6 +280,7 @@ public:
       stuck_counter = 0;
       initial_goal_dist = 1.0;
       mission_complete = false;
+      weak_connectivity_steps = 0;
 
       if(csv.is_open()) {
          csv.close();
@@ -326,6 +329,7 @@ public:
           << "min_obstacle_decoy,"
           << "lambda2_proxy,"
           << "min_neighbor_count,"
+          << "weak_connectivity_steps,"
           << "num_connected_components,"
           << "largest_component_fraction,"
           << "bridge_pairs,"
@@ -749,17 +753,28 @@ public:
       Real health = 1.0;
 
       /*
-         Do not collapse health too aggressively.
-         Earlier core-lock version could deadlock/stall because the core slowed too much.
+         Step 3.2:
+         Local k-connectivity now affects health earlier.
+         This prevents the core from pulling the shell forward while one agent
+         is already close to isolation.
+      */
+      if(min_neighbors <= 1) {
+         health *= 0.45;
+      }
+      else if(min_neighbors <= static_cast<int>(k_conn)) {
+         health *= 0.55;
+      }
+      else if(min_neighbors <= static_cast<int>(k_conn + 1)) {
+         health *= 0.75;
+      }
+
+      /*
+         Keep protection-sensitive slowdown, but do not fully stall.
       */
       if(pinfl < 0.45) {
          health *= 0.65;
       } else if(pinfl < 0.55) {
          health *= 0.80;
-      }
-
-      if(min_neighbors < static_cast<int>(k_conn)) {
-         health *= 0.75;
       }
 
       if(min_dd < 0.08) {
@@ -775,9 +790,9 @@ public:
       }
 
       /*
-         Critical anti-stall fix:
-         Never let formation health collapse to near zero.
-         The swarm must keep moving enough to escape bad obstacle geometry.
+         Anti-stall floor:
+         even when locally weak, the swarm must keep enough motion to escape
+         obstacle-induced bad geometry.
       */
       return std::max<Real>(0.35, Clamp01(health));
    }
@@ -1926,10 +1941,23 @@ public:
             protection-aware way. Slot/core dominate, not nearest clump.
          */
          int n_neighbors = NeighborCountCurrent(a.pos, a.id);
-         if(n_neighbors < static_cast<int>(k_conn)) {
-            CVector3 rescue = ConnectivityRescueForce(a.pos, a.id, slot, core);
+         if(n_neighbors <= static_cast<int>(k_conn + 1)) {
+            CVector3 rescue = ConnectivityRescueForce(a.pos, a.id, slot, core, n_neighbors);
             a.pos = ProjectOutside(a.pos + rescue);
-            a.vel *= 0.35;
+
+            /*
+               Urgent cases should damp the old velocity more aggressively
+               so the weak agent does not keep drifting away.
+            */
+            if(n_neighbors <= 1) {
+               a.vel *= 0.15;
+            }
+            else if(n_neighbors <= static_cast<int>(k_conn)) {
+               a.vel *= 0.25;
+            }
+            else {
+               a.vel *= 0.35;
+            }
          }
 
          if(dec_idx >= 0 && dec_idx < static_cast<int>(decoys.size())) {
@@ -2255,7 +2283,8 @@ public:
    CVector3 ConnectivityRescueForce(const CVector3& p,
                                     const std::string& self_id,
                                     const CVector3& slot,
-                                    const CVector3& core) const {
+                                    const CVector3& core,
+                                    int n_neighbors) const {
       std::vector<std::pair<Real, CVector3>> near_agents;
 
       for(const auto& b : agents) {
@@ -2268,7 +2297,7 @@ public:
       }
 
       if(near_agents.empty()) {
-         return LimitXY(core - p, k_conn_rescue);
+         return Limit3D(core - p, k_conn_rescue);
       }
 
       std::sort(near_agents.begin(), near_agents.end(),
@@ -2280,7 +2309,12 @@ public:
       CVector3 neighbor_centroid(0,0,0);
       int used = 0;
 
-      int max_use = std::min<int>(static_cast<int>(k_conn), static_cast<int>(near_agents.size()));
+      /*
+         Use slightly more nearby agents than k_conn so that repair creates
+         redundant replacement links, not only one fragile bridge.
+      */
+      int max_use = std::min<int>(static_cast<int>(k_conn + 2),
+                                  static_cast<int>(near_agents.size()));
 
       for(int i = 0; i < max_use; ++i) {
          neighbor_centroid += near_agents[i].second;
@@ -2296,17 +2330,43 @@ public:
       neighbor_centroid = ClampZ(neighbor_centroid);
 
       /*
-         Protection-aware replacement-link rescue:
-         slot and core dominate; nearest neighbors are only secondary.
+         Step 3.2 urgent local-k repair:
+         - if a decoy is almost isolated, nearest-neighbor centroid dominates
+         - if it is only slightly weak, slot/core still dominate
+         This keeps the repair non-rigid and replacement-link based.
       */
+      Real w_slot = 0.55;
+      Real w_core = 0.20;
+      Real w_near = 0.25;
+      Real step_max = k_conn_rescue;
+
+      if(n_neighbors <= 1) {
+         w_slot = 0.25;
+         w_core = 0.10;
+         w_near = 0.65;
+         step_max = 0.240;
+      }
+      else if(n_neighbors <= static_cast<int>(k_conn)) {
+         w_slot = 0.38;
+         w_core = 0.15;
+         w_near = 0.47;
+         step_max = 0.190;
+      }
+      else if(n_neighbors <= static_cast<int>(k_conn + 1)) {
+         w_slot = 0.48;
+         w_core = 0.18;
+         w_near = 0.34;
+         step_max = 0.150;
+      }
+
       CVector3 desired =
-         slot              * 0.60 +
-         core              * 0.25 +
-         neighbor_centroid * 0.15;
+         slot              * w_slot +
+         core              * w_core +
+         neighbor_centroid * w_near;
 
       desired = ClampZ(desired);
 
-      return Limit3D(desired - p, k_conn_rescue);
+      return Limit3D(desired - p, step_max);
    }
 
    std::vector<std::vector<int>> ConnectedComponents() const {
@@ -2366,6 +2426,127 @@ public:
       }
 
       return static_cast<Real>(best) / static_cast<Real>(n);
+   }
+
+   std::vector<int> DegreeVectorCurrent() const {
+      const int n = static_cast<int>(agents.size());
+      std::vector<int> degree(n, 0);
+
+      for(int i = 0; i < n; ++i) {
+         for(int j = i + 1; j < n; ++j) {
+            Real d = (agents[i].pos - agents[j].pos).Length();
+            if(d <= graph_radius) {
+               degree[i]++;
+               degree[j]++;
+            }
+         }
+      }
+
+      return degree;
+   }
+
+   void LocalKConnectivityRepair() {
+      /*
+         Step 3.2:
+         This repair works even when the whole graph is still one component.
+         It prevents locally fragile agents from reaching degree 1 or 0.
+         The identity of the links is non-rigid: the agent is pulled toward
+         whichever nearby non-neighbor can restore redundant links fastest.
+      */
+      std::vector<int> degree = DegreeVectorCurrent();
+      const int n = static_cast<int>(agents.size());
+
+      for(int i = 0; i < n; ++i) {
+         if(degree[i] > static_cast<int>(k_conn + 1)) {
+            continue;
+         }
+
+         Real best_d = std::numeric_limits<Real>::max();
+         int best_j = -1;
+
+         /*
+            Prefer the closest agent that is not already a neighbor.
+            This creates a new replacement link instead of only shortening
+            existing links.
+         */
+         for(int j = 0; j < n; ++j) {
+            if(i == j) {
+               continue;
+            }
+
+            Real d = (agents[i].pos - agents[j].pos).Length();
+
+            if(d <= graph_radius * 0.92) {
+               continue;
+            }
+
+            if(d < best_d) {
+               best_d = d;
+               best_j = j;
+            }
+         }
+
+         /*
+            If every nearby agent is already inside the graph radius, fall back
+            to the nearest agent. This can still strengthen weak local geometry.
+         */
+         if(best_j < 0) {
+            for(int j = 0; j < n; ++j) {
+               if(i == j) {
+                  continue;
+               }
+
+               Real d = (agents[i].pos - agents[j].pos).Length();
+               if(d < best_d) {
+                  best_d = d;
+                  best_j = j;
+               }
+            }
+         }
+
+         if(best_j < 0) {
+            continue;
+         }
+
+         Real pull_i_mag = 0.070;
+         Real pull_j_mag = 0.025;
+
+         if(degree[i] <= 1) {
+            pull_i_mag = 0.170;
+            pull_j_mag = 0.060;
+         }
+         else if(degree[i] <= static_cast<int>(k_conn)) {
+            pull_i_mag = 0.120;
+            pull_j_mag = 0.045;
+         }
+
+         CVector3 pi = agents[i].pos;
+         CVector3 pj = agents[best_j].pos;
+
+         CVector3 pull_i = Limit3D(pj - pi, pull_i_mag);
+         CVector3 pull_j = Limit3D(pi - pj, pull_j_mag);
+
+         agents[i].pos = ProjectOutside(agents[i].pos + pull_i);
+         agents[best_j].pos = ProjectOutside(agents[best_j].pos + pull_j);
+
+         if(agents[i].influential) {
+            agents[i].pos = SetFlightZ(agents[i].pos);
+         } else {
+            agents[i].pos = Clamp(agents[i].pos);
+         }
+
+         if(agents[best_j].influential) {
+            agents[best_j].pos = SetFlightZ(agents[best_j].pos);
+         } else {
+            agents[best_j].pos = Clamp(agents[best_j].pos);
+         }
+
+         agents[i].vel *= 0.20;
+         agents[best_j].vel *= 0.70;
+
+         last_bridge_pairs++;
+         last_bridge_distance = std::max(last_bridge_distance, best_d);
+      }
    }
 
    void ComponentBridgeRepair() {
@@ -2647,9 +2828,21 @@ public:
 
       /*
          Step-3 connectivity repair:
-         If the graph splits, pull closest components together before rendering.
+         If the graph splits, pull closest components together.
       */
       ComponentBridgeRepair();
+
+      /*
+         Step-3.2 local k-connectivity repair:
+         Even when the graph has one component, reinforce agents with
+         too few local neighbors.
+      */
+      LocalKConnectivityRepair();
+
+      if(MinNeighborCountCurrent() <= static_cast<int>(k_conn + 1) ||
+         NumConnectedComponents() > 1) {
+         weak_connectivity_steps++;
+      }
 
       ApplyMovement();
       ApplyObstacleVisuals();
@@ -2780,6 +2973,7 @@ public:
              << min_od << ","
              << lambda2 << ","
              << min_neighbors << ","
+             << weak_connectivity_steps << ","
              << num_components << ","
              << largest_component_fraction << ","
              << last_bridge_pairs << ","
@@ -2819,6 +3013,7 @@ public:
              << " min_od=" << min_od
              << " lambda2_proxy=" << lambda2
              << " min_neighbors=" << min_neighbors
+             << " weak_steps=" << weak_connectivity_steps
              << " components=" << num_components
              << " largest_comp=" << largest_component_fraction
              << " bridge_pairs=" << last_bridge_pairs
