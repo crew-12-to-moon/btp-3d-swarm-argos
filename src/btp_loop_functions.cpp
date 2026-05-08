@@ -73,12 +73,17 @@ public:
    std::vector<Agent> agents;
    std::vector<BoxObs> obstacles;
    std::vector<CVector3> waypoints;
+   std::vector<CVector3> shell_dirs;
 
    UInt32 step = 0;
    bool initialized = false;
    UInt32 current_wp = 0;
 
    std::ofstream csv;
+   std::ofstream agent_csv;
+
+   Real last_bridge_distance = 0.0;
+   UInt32 last_bridge_pairs = 0;
 
    /*
       30-swarm setup:
@@ -102,6 +107,18 @@ public:
    Real rmax  = 2.10;
    Real rring = 1.55;
    Real tau   = 0.60;
+
+   /*
+      Step-2 3D protection shell:
+      Decoy slots are distributed over a Fibonacci sphere around the influential core.
+      This replaces the earlier purely planar ring and gives top/bottom protection.
+   */
+   Real shell_radius = 1.55;
+   Real shell_slot_gain = 0.135;
+   Real shell_z_scale = 0.75;
+   Real zmin = 0.65;
+   Real zmax = 2.75;
+   Real vertical_band_min = 0.35;
 
    /*
       Influential motion.
@@ -226,8 +243,16 @@ public:
    UInt32 k_conn = 3;
    Real k_conn_rescue = 0.120;
 
+   /*
+      Step-3 connectivity repair.
+      If disk graph splits into components, closest components are pulled together.
+      This is non-rigid replacement-link repair, not old-edge preservation.
+   */
+   Real k_component_bridge = 0.120;
+   Real bridge_soft_margin = 0.85;
+
    void Init(TConfigurationNode&) override {
-      LOG << "BTP ARGoS STEP-1 PRIORITY-GA initialized: prioritized decentralized GA, protected decoy ring" << std::endl;
+      LOG << "BTP ARGoS STEP-3 CONNECTIVITY initialized: priority GA + 3D shell + component bridge repair" << std::endl;
 
       std::srand(7);
 
@@ -235,6 +260,7 @@ public:
       InitObstacles();
       LinkObstacleVisuals();
       InitWaypoints();
+      InitShellDirections();
       InitDecoyPopulations();
       InitDefinedFormation();
       OpenCSV();
@@ -256,6 +282,12 @@ public:
       if(csv.is_open()) {
          csv.close();
       }
+      if(agent_csv.is_open()) {
+         agent_csv.close();
+      }
+
+      last_bridge_distance = 0.0;
+      last_bridge_pairs = 0;
 
       std::srand(7);
 
@@ -263,6 +295,7 @@ public:
       InitObstacles();
       LinkObstacleVisuals();
       InitWaypoints();
+      InitShellDirections();
       InitDecoyPopulations();
       InitDefinedFormation();
       OpenCSV();
@@ -271,6 +304,9 @@ public:
    void Destroy() override {
       if(csv.is_open()) {
          csv.close();
+      }
+      if(agent_csv.is_open()) {
+         agent_csv.close();
       }
    }
 
@@ -290,6 +326,10 @@ public:
           << "min_obstacle_decoy,"
           << "lambda2_proxy,"
           << "min_neighbor_count,"
+          << "num_connected_components,"
+          << "largest_component_fraction,"
+          << "bridge_pairs,"
+          << "bridge_distance,"
           << "protection_infl_mean,"
           << "protection_decoy_mean,"
           << "struct_infl_mean,"
@@ -308,8 +348,16 @@ public:
           << "formation_health,"
           << "goal_progress_score,"
           << "criticality_score,"
+          << "mean_shell_error,"
+          << "spherical_coverage_score,"
+          << "vertical_protection_score,"
+          << "upper_decoy_count,"
+          << "lower_decoy_count,"
           << "mission_complete"
           << "\n";
+
+      agent_csv.open("btp_agent_positions.csv");
+      agent_csv << "step,agent_id,type,x,y,z\n";
    }
 
    void LoadAgents() {
@@ -522,6 +570,27 @@ public:
       return p;
    }
 
+   CVector3 ClampZ(CVector3 p) const {
+      p.SetZ(std::max(zmin, std::min(zmax, p.GetZ())));
+      return p;
+   }
+
+   CVector3 NormalizeSafe3D(const CVector3& v) const {
+      Real L = v.Length();
+      if(L < 1e-9) {
+         return CVector3(0,0,0);
+      }
+      return v / L;
+   }
+
+   CVector3 Limit3D(CVector3 v, Real max_mag) const {
+      Real L = v.Length();
+      if(L > max_mag && L > 1e-9) {
+         return (v / L) * max_mag;
+      }
+      return v;
+   }
+
    CVector3 NormalizeSafeXY(const CVector3& v) const {
       CVector3 u = v;
       u.SetZ(0.0);
@@ -548,7 +617,7 @@ public:
    CVector3 Clamp(CVector3 p) const {
       p.SetX(std::max(xmin, std::min(xmax, p.GetX())));
       p.SetY(std::max(ymin, std::min(ymax, p.GetY())));
-      p.SetZ(flight_z);
+      p.SetZ(std::max(zmin, std::min(zmax, p.GetZ())));
       return p;
    }
 
@@ -615,7 +684,7 @@ public:
    }
 
    CVector3 ProjectOutside(CVector3 p) const {
-      p.SetZ(flight_z);
+      p = ClampZ(p);
 
       for(const auto& o : obstacles) {
          Real phi = SDFBox(p, o) - obs_safe;
@@ -623,7 +692,7 @@ public:
          if(phi < 0.0) {
             CVector3 n = GradSDFBoxXY(p, o);
             p += n * (-phi + 0.03);
-            p.SetZ(flight_z);
+            p = ClampZ(p);
          }
       }
 
@@ -796,14 +865,50 @@ public:
       Real pinfl  = ProtectionInfluentialMean();
       int min_neighbors = MinNeighborCountCurrent();
       Real max_infl_dist = MaxInfluentialDistanceFromCore();
+      Real vertical_score = VerticalProtectionScore();
 
       return
+         vertical_score > 0.65 &&
          lambda2 > complete_min_lambda2_proxy &&
+         NumConnectedComponents() == 1 &&
          min_neighbors >= static_cast<int>(k_conn) &&
          min_dd  > complete_min_decoy_dist &&
          min_od  > complete_min_obs_dist &&
          pinfl   > complete_min_protection &&
          max_infl_dist < complete_max_infl_core_dist;
+   }
+
+   void InitShellDirections() {
+      shell_dirs.clear();
+      int ndec = CountDec();
+
+      if(ndec <= 0) {
+         return;
+      }
+
+      /*
+         Fibonacci sphere directions.
+         Directions are deterministic and approximately uniform over the sphere.
+         shell_z_scale slightly compresses vertical spread for easier ARGoS visualization
+         while still providing upper and lower protection.
+      */
+      const Real golden_angle = ARGOS_PI * (3.0 - std::sqrt(5.0));
+
+      for(int j = 0; j < ndec; ++j) {
+         Real z = 1.0 - 2.0 * (static_cast<Real>(j) + 0.5) / static_cast<Real>(ndec);
+         Real r = std::sqrt(std::max<Real>(0.0, 1.0 - z * z));
+         Real th = golden_angle * static_cast<Real>(j);
+
+         CVector3 b(r * std::cos(th),
+                    r * std::sin(th),
+                    shell_z_scale * z);
+
+         b = NormalizeSafe3D(b);
+         shell_dirs.push_back(b);
+      }
+
+      LOG << "Initialized " << shell_dirs.size()
+          << " Fibonacci shell directions for 3D protection." << std::endl;
    }
 
    void InitDefinedFormation() {
@@ -832,14 +937,12 @@ public:
       for(auto& a : agents) {
          if(a.influential) continue;
 
-         Real th = 2.0 * ARGOS_PI * static_cast<Real>(j) / std::max(1, ndec);
+         CVector3 dir(1,0,0);
+         if(j >= 0 && j < static_cast<int>(shell_dirs.size())) {
+            dir = shell_dirs[j];
+         }
 
-         a.pos = SetFlightZ(start + CVector3(
-            rring * std::cos(th),
-            rring * std::sin(th),
-            0.0
-         ));
-
+         a.pos = Clamp(start + dir * shell_radius);
          a.vel = CVector3(0,0,0);
          a.slot = j;
          j++;
@@ -850,7 +953,7 @@ public:
 
       initialized = true;
 
-      LOG << "Defined 4-influential + 26-decoy protection ring initialized at z="
+      LOG << "Defined 4-influential + 26-decoy 3D protection shell initialized around z="
           << flight_z << std::endl;
    }
 
@@ -879,11 +982,11 @@ public:
       for(size_t k = 0; k < decoys.size(); ++k) {
          if(static_cast<int>(k) == self) continue;
 
-         CVector3 d = XYOnly(y - decoys[k]);
+         CVector3 d = y - decoys[k];
          Real L = d.Length();
 
          if(L < dec_sep_radius && L > 1e-6) {
-            f += NormalizeSafeXY(d) * ((dec_sep_radius - L) / dec_sep_radius);
+            f += NormalizeSafe3D(d) * ((dec_sep_radius - L) / dec_sep_radius);
          }
       }
 
@@ -896,7 +999,7 @@ public:
       CVector3 nearest(0,0,flight_z);
 
       for(const auto& x : infls) {
-         Real d = XYOnly(y - x).Length();
+         Real d = (y - x).Length();
 
          if(d < best) {
             best = d;
@@ -904,7 +1007,7 @@ public:
          }
       }
 
-      CVector3 radial = XYOnly(y - nearest);
+      CVector3 radial = y - nearest;
       Real d = radial.Length();
 
       if(d < 1e-6) {
@@ -1004,20 +1107,15 @@ public:
          return core;
       }
 
-      Real th0 = 2.0 * ARGOS_PI * static_cast<Real>(dec_idx) / ndec;
+      CVector3 dir(1,0,0);
+      if(dec_idx >= 0 && dec_idx < static_cast<int>(shell_dirs.size())) {
+         dir = shell_dirs[dec_idx];
+      } else {
+         Real th = 2.0 * ARGOS_PI * static_cast<Real>(dec_idx) / std::max(1, ndec);
+         dir = NormalizeSafe3D(CVector3(std::cos(th), std::sin(th), 0.0));
+      }
 
-      /*
-         Almost no rotation.
-         Ring should translate with the core, not swirl around it.
-      */
-      Real rot = 0.00005 * static_cast<Real>(step);
-      Real th = th0 + rot;
-
-      return SetFlightZ(core + CVector3(
-         rring * std::cos(th),
-         rring * std::sin(th),
-         0.0
-      ));
+      return Clamp(core + dir * shell_radius);
    }
 
    CVector3 SlotTarget(const Agent& a, const CVector3& core) const {
@@ -1043,7 +1141,7 @@ public:
          Strong assigned-slot force.
          This is the dominant protection-preserving force.
       */
-      CVector3 f_slot = XYOnly(slot_target - y) * k_slot_bias;
+      CVector3 f_slot = (slot_target - y) * shell_slot_gain;
 
       CVector3 radial = NormalizeSafeXY(y - core);
       CVector3 tangent(-radial.GetY(), radial.GetX(), 0.0);
@@ -1062,7 +1160,7 @@ public:
          f_slot +
          f_tangent;
 
-      return LimitXY(v + f, c.s);
+      return Limit3D(v + f, c.s);
    }
 
    Real BandMembership(Real d) const {
@@ -1081,7 +1179,7 @@ public:
       Real best = 0.0;
 
       for(const auto& x : infls) {
-         Real d = XYOnly(y - x).Length();
+         Real d = (y - x).Length();
          best = std::max(best, BandMembership(d));
       }
 
@@ -1119,7 +1217,7 @@ public:
 
       for(int i = 0; i < n; ++i) {
          for(int j = i + 1; j < n; ++j) {
-            if(XYOnly(pts[i] - pts[j]).Length() <= graph_radius) {
+            if((pts[i] - pts[j]).Length() <= graph_radius) {
                edges++;
             }
          }
@@ -1142,7 +1240,7 @@ public:
             continue;
          }
 
-         if(XYOnly(pts[self_idx] - pts[i]).Length() <= radius) {
+         if((pts[self_idx] - pts[i]).Length() <= radius) {
             count++;
          }
       }
@@ -1175,7 +1273,7 @@ public:
    }
 
    Real CandidateSlotReward(const CVector3& y, const CVector3& slot) const {
-      Real d = XYOnly(y - slot).Length();
+      Real d = (y - slot).Length();
       return std::exp(-d / 0.65);
    }
 
@@ -1359,24 +1457,36 @@ public:
          return 0.0;
       }
 
+      int upper = 0;
+      int lower = 0;
+      CVector3 core = MeanPosition(infls);
+
+      for(const auto& y : decoys) {
+         if(y.GetZ() > core.GetZ() + vertical_band_min) upper++;
+         if(y.GetZ() < core.GetZ() - vertical_band_min) lower++;
+      }
+
+      int target_upper = std::max(1, static_cast<int>(decoys.size()) / 4);
+      int target_lower = std::max(1, static_cast<int>(decoys.size()) / 4);
+      Real vertical_score = Clamp01(std::min(
+         static_cast<Real>(upper) / static_cast<Real>(target_upper),
+         static_cast<Real>(lower) / static_cast<Real>(target_lower)
+      ));
+
       Real total = 0.0;
 
       for(const auto& x : infls) {
          Real sumB = 0.0;
-         std::vector<Real> angles;
 
          for(const auto& y : decoys) {
-            CVector3 r = XYOnly(y - x);
-            Real d = r.Length();
-
+            Real d = (y - x).Length();
             sumB += BandMembership(d);
-            angles.push_back(std::atan2(r.GetY(), r.GetX()));
          }
 
          Real meanB = sumB / static_cast<Real>(decoys.size());
-         Real gamma = AngularUniformity(angles);
+         Real gamma3d = SphericalCoverageScore(x, decoys);
 
-         total += 0.8 * meanB + 0.2 * gamma;
+         total += 0.65 * meanB + 0.25 * gamma3d + 0.10 * vertical_score;
       }
 
       return total / static_cast<Real>(infls.size());
@@ -1789,11 +1899,11 @@ public:
             Slot rescue:
             If a decoy drifted from its assigned ring sector, pull it back.
          */
-         CVector3 to_slot = XYOnly(slot - a.pos);
+         CVector3 to_slot = slot - a.pos;
          Real slot_dist = to_slot.Length();
 
          if(slot_dist > 0.95) {
-            CVector3 rescue = LimitXY(to_slot * 0.40, 0.080);
+            CVector3 rescue = Limit3D(to_slot * 0.40, 0.080);
             a.pos = ProjectOutside(a.pos + rescue);
             a.vel *= 0.25;
          }
@@ -1805,7 +1915,7 @@ public:
          Real dcore = XYOnly(a.pos - core).Length();
 
          if(dcore > rmax + 0.65) {
-            CVector3 pull = LimitXY(slot - a.pos, 0.090);
+            CVector3 pull = Limit3D(slot - a.pos, 0.090);
             a.pos = ProjectOutside(a.pos + pull);
             a.vel *= 0.20;
          }
@@ -1865,6 +1975,89 @@ public:
       return std::exp(-acc / static_cast<Real>(angles.size()));
    }
 
+   Real SphericalCoverageScore(const CVector3& center,
+                               const std::vector<CVector3>& decoys) const {
+      if(decoys.empty() || shell_dirs.empty()) {
+         return 0.0;
+      }
+
+      Real err_sum = 0.0;
+      int count = 0;
+
+      for(size_t j = 0; j < decoys.size(); ++j) {
+         CVector3 u = NormalizeSafe3D(decoys[j] - center);
+         CVector3 b = shell_dirs[j % shell_dirs.size()];
+         CVector3 e = u - b;
+         err_sum += e.Length() * e.Length();
+         count++;
+      }
+
+      if(count == 0) {
+         return 0.0;
+      }
+
+      return std::exp(-err_sum / static_cast<Real>(count));
+   }
+
+   Real MeanShellError() const {
+      CVector3 core = CoreCentroid();
+      Real sum = 0.0;
+      int count = 0;
+
+      for(const auto& a : agents) {
+         if(a.influential) continue;
+         CVector3 slot = SlotTarget(a, core);
+         sum += (a.pos - slot).Length();
+         count++;
+      }
+
+      if(count == 0) return 0.0;
+      return sum / static_cast<Real>(count);
+   }
+
+   int UpperDecoyCount() const {
+      CVector3 core = CoreCentroid();
+      int count = 0;
+      for(const auto& a : agents) {
+         if(!a.influential && a.pos.GetZ() > core.GetZ() + vertical_band_min) {
+            count++;
+         }
+      }
+      return count;
+   }
+
+   int LowerDecoyCount() const {
+      CVector3 core = CoreCentroid();
+      int count = 0;
+      for(const auto& a : agents) {
+         if(!a.influential && a.pos.GetZ() < core.GetZ() - vertical_band_min) {
+            count++;
+         }
+      }
+      return count;
+   }
+
+   Real VerticalProtectionScore() const {
+      int ndec = CountDec();
+      if(ndec <= 0) return 0.0;
+
+      int target_upper = std::max(1, ndec / 4);
+      int target_lower = std::max(1, ndec / 4);
+      Real upper_ratio = static_cast<Real>(UpperDecoyCount()) / static_cast<Real>(target_upper);
+      Real lower_ratio = static_cast<Real>(LowerDecoyCount()) / static_cast<Real>(target_lower);
+
+      return Clamp01(std::min(upper_ratio, lower_ratio));
+   }
+
+   Real GlobalSphericalCoverageScore() const {
+      std::vector<CVector3> decoys;
+      CVector3 core = CoreCentroid();
+      for(const auto& a : agents) {
+         if(!a.influential) decoys.push_back(a.pos);
+      }
+      return SphericalCoverageScore(core, decoys);
+   }
+
    std::vector<Real> ProtectionDiagnosticVector() const {
       std::vector<CVector3> infls;
       std::vector<CVector3> decoys;
@@ -1875,30 +2068,31 @@ public:
       }
 
       std::vector<Real> P;
+      Real vertical_score = VerticalProtectionScore();
 
       /*
-         Influential protection.
+         Step-2 3D influential protection:
+         Band membership is fully 3D and angular coverage is replaced by
+         spherical shell coverage. This adds upper/lower protection.
       */
       for(const auto& x : infls) {
          Real sumB = 0.0;
-         std::vector<Real> angles;
 
          for(const auto& y : decoys) {
-            CVector3 r = XYOnly(y - x);
-            Real d = r.Length();
-
+            Real d = (y - x).Length();
             sumB += BandMembership(d);
-            angles.push_back(std::atan2(r.GetY(), r.GetX()));
          }
 
          Real meanB = decoys.empty() ? 0.0 : sumB / static_cast<Real>(decoys.size());
-         Real gamma = AngularUniformity(angles);
+         Real gamma3d = SphericalCoverageScore(x, decoys);
 
-         P.push_back(0.8 * meanB + 0.2 * gamma);
+         P.push_back(0.65 * meanB + 0.25 * gamma3d + 0.10 * vertical_score);
       }
 
       /*
-         Decoy diagnostic protection.
+         Decoy diagnostic protection remains symmetric but now uses 3D distances.
+         The angular term is kept planar for diagnostics only; the main influential
+         protection score above is the 3D shell score.
       */
       std::vector<CVector3> allpts;
 
@@ -1913,14 +2107,15 @@ public:
          std::vector<Real> angles;
 
          for(size_t q = 0; q < allpts.size(); ++q) {
-            CVector3 r = XYOnly(allpts[q] - y);
-            Real d = r.Length();
+            CVector3 r3 = allpts[q] - y;
+            Real d = r3.Length();
 
             if(d < 1e-8) {
                continue;
             }
 
             sumB += BandMembership(d);
+            CVector3 r = XYOnly(r3);
             angles.push_back(std::atan2(r.GetY(), r.GetX()));
             count++;
          }
@@ -2028,7 +2223,7 @@ public:
             continue;
          }
 
-         if(XYOnly(p - b.pos).Length() <= graph_radius) {
+         if((p - b.pos).Length() <= graph_radius) {
             count++;
          }
       }
@@ -2068,7 +2263,7 @@ public:
             continue;
          }
 
-         Real d = XYOnly(p - b.pos).Length();
+         Real d = (p - b.pos).Length();
          near_agents.push_back(std::make_pair(d, b.pos));
       }
 
@@ -2098,7 +2293,7 @@ public:
          neighbor_centroid = core;
       }
 
-      neighbor_centroid.SetZ(flight_z);
+      neighbor_centroid = ClampZ(neighbor_centroid);
 
       /*
          Protection-aware replacement-link rescue:
@@ -2109,9 +2304,145 @@ public:
          core              * 0.25 +
          neighbor_centroid * 0.15;
 
-      desired.SetZ(flight_z);
+      desired = ClampZ(desired);
 
-      return LimitXY(desired - p, k_conn_rescue);
+      return Limit3D(desired - p, k_conn_rescue);
+   }
+
+   std::vector<std::vector<int>> ConnectedComponents() const {
+      const int n = static_cast<int>(agents.size());
+      std::vector<std::vector<int>> comps;
+      std::vector<int> visited(n, 0);
+
+      for(int start_idx = 0; start_idx < n; ++start_idx) {
+         if(visited[start_idx]) {
+            continue;
+         }
+
+         std::vector<int> comp;
+         std::vector<int> stack;
+         stack.push_back(start_idx);
+         visited[start_idx] = 1;
+
+         while(!stack.empty()) {
+            int u = stack.back();
+            stack.pop_back();
+            comp.push_back(u);
+
+            for(int v = 0; v < n; ++v) {
+               if(u == v || visited[v]) {
+                  continue;
+               }
+
+               Real d = (agents[u].pos - agents[v].pos).Length();
+               if(d <= graph_radius) {
+                  visited[v] = 1;
+                  stack.push_back(v);
+               }
+            }
+         }
+
+         comps.push_back(comp);
+      }
+
+      return comps;
+   }
+
+   int NumConnectedComponents() const {
+      return static_cast<int>(ConnectedComponents().size());
+   }
+
+   Real LargestComponentFraction() const {
+      const int n = static_cast<int>(agents.size());
+      if(n <= 0) {
+         return 0.0;
+      }
+
+      auto comps = ConnectedComponents();
+      int best = 0;
+
+      for(const auto& c : comps) {
+         best = std::max(best, static_cast<int>(c.size()));
+      }
+
+      return static_cast<Real>(best) / static_cast<Real>(n);
+   }
+
+   void ComponentBridgeRepair() {
+      auto comps = ConnectedComponents();
+
+      last_bridge_distance = 0.0;
+      last_bridge_pairs = 0;
+
+      if(comps.size() <= 1) {
+         return;
+      }
+
+      /*
+         Choose the largest component as the anchor.
+         Every smaller component is connected back to it through the closest pair.
+         This is non-rigid: the pair can change every timestep.
+      */
+      int largest_idx = 0;
+      for(int c = 1; c < static_cast<int>(comps.size()); ++c) {
+         if(comps[c].size() > comps[largest_idx].size()) {
+            largest_idx = c;
+         }
+      }
+
+      const auto& anchor = comps[largest_idx];
+
+      for(int c = 0; c < static_cast<int>(comps.size()); ++c) {
+         if(c == largest_idx) {
+            continue;
+         }
+
+         Real best_d = std::numeric_limits<Real>::max();
+         int best_i = -1;
+         int best_j = -1;
+
+         for(int i : comps[c]) {
+            for(int j : anchor) {
+               Real d = (agents[i].pos - agents[j].pos).Length();
+               if(d < best_d) {
+                  best_d = d;
+                  best_i = i;
+                  best_j = j;
+               }
+            }
+         }
+
+         if(best_i < 0 || best_j < 0) {
+            continue;
+         }
+
+         CVector3 pi = agents[best_i].pos;
+         CVector3 pj = agents[best_j].pos;
+
+         CVector3 pull_i = Limit3D(pj - pi, k_component_bridge);
+         CVector3 pull_j = Limit3D(pi - pj, k_component_bridge * 0.65);
+
+         agents[best_i].pos = ProjectOutside(agents[best_i].pos + pull_i);
+         agents[best_j].pos = ProjectOutside(agents[best_j].pos + pull_j);
+
+         if(agents[best_i].influential) {
+            agents[best_i].pos = SetFlightZ(agents[best_i].pos);
+         } else {
+            agents[best_i].pos = Clamp(agents[best_i].pos);
+         }
+
+         if(agents[best_j].influential) {
+            agents[best_j].pos = SetFlightZ(agents[best_j].pos);
+         } else {
+            agents[best_j].pos = Clamp(agents[best_j].pos);
+         }
+
+         agents[best_i].vel *= 0.35;
+         agents[best_j].vel *= 0.55;
+
+         last_bridge_pairs++;
+         last_bridge_distance = std::max(last_bridge_distance, best_d);
+      }
    }
 
    Real Lambda2FastProxy() const {
@@ -2130,7 +2461,7 @@ public:
 
       for(int i = 0; i < n; ++i) {
          for(int j = i + 1; j < n; ++j) {
-            Real d = XYOnly(pts[i] - pts[j]).Length();
+            Real d = (pts[i] - pts[j]).Length();
 
             if(d <= graph_radius) {
                A[i][j] = 1;
@@ -2191,7 +2522,7 @@ public:
 
          for(const auto& b : agents) {
             if(!b.influential) continue;
-            best = std::min(best, XYOnly(a.pos - b.pos).Length());
+            best = std::min(best, (a.pos - b.pos).Length());
          }
 
          Real err = 0.0;
@@ -2218,7 +2549,7 @@ public:
 
          for(size_t j = i + 1; j < agents.size(); ++j) {
             if(agents[j].influential) continue;
-            best = std::min(best, XYOnly(agents[i].pos - agents[j].pos).Length());
+            best = std::min(best, (agents[i].pos - agents[j].pos).Length());
          }
       }
 
@@ -2281,7 +2612,11 @@ public:
       q.FromEulerAngles(CRadians(0), CRadians(0), CRadians(0));
 
       for(auto& a : agents) {
-         a.pos = SetFlightZ(a.pos);
+         if(a.influential) {
+            a.pos = SetFlightZ(a.pos);
+         } else {
+            a.pos = Clamp(a.pos);
+         }
          a.entity->GetEmbodiedEntity().MoveTo(a.pos, q, false);
       }
    }
@@ -2310,6 +2645,12 @@ public:
       UpdateInfluentials();
       UpdateDecoys();
 
+      /*
+         Step-3 connectivity repair:
+         If the graph splits, pull closest components together before rendering.
+      */
+      ComponentBridgeRepair();
+
       ApplyMovement();
       ApplyObstacleVisuals();
 
@@ -2317,8 +2658,27 @@ public:
          WriteLogRow(false);
       }
 
+      if(agent_csv.is_open() && step % csv_log_period == 0) {
+         WriteAgentPositions();
+      }
+
       if(step % terminal_log_period == 0) {
          WriteLogRow(true);
+      }
+   }
+
+   void WriteAgentPositions() {
+      if(!agent_csv.is_open()) {
+         return;
+      }
+
+      for(const auto& a : agents) {
+         agent_csv << step << ","
+                   << a.id << ","
+                   << (a.influential ? "infl" : "dec") << ","
+                   << a.pos.GetX() << ","
+                   << a.pos.GetY() << ","
+                   << a.pos.GetZ() << "\n";
       }
    }
 
@@ -2335,6 +2695,8 @@ public:
       Real min_od   = MinObstacleDecoyDistance();
       Real lambda2  = Lambda2FastProxy();
       int min_neighbors = MinNeighborCountCurrent();
+      int num_components = NumConnectedComponents();
+      Real largest_component_fraction = LargestComponentFraction();
 
       std::vector<Real> P = ProtectionDiagnosticVector();
       std::vector<Real> S = StructuralScores();
@@ -2398,6 +2760,11 @@ public:
       Real formation_health = FormationHealthFactor();
       Real goal_prog = GoalProgressScore();
       Real crit = CriticalityScore(margin_combined_mean, lambda2, min_od, min_dd, max_infl_dist);
+      Real mean_shell_error = MeanShellError();
+      Real spherical_coverage = GlobalSphericalCoverageScore();
+      Real vertical_protection = VerticalProtectionScore();
+      int upper_decoys = UpperDecoyCount();
+      int lower_decoys = LowerDecoyCount();
 
       if(!terminal) {
          csv << step << ","
@@ -2413,6 +2780,10 @@ public:
              << min_od << ","
              << lambda2 << ","
              << min_neighbors << ","
+             << num_components << ","
+             << largest_component_fraction << ","
+             << last_bridge_pairs << ","
+             << last_bridge_distance << ","
              << prot_infl_mean << ","
              << prot_dec_mean << ","
              << struct_infl_mean << ","
@@ -2431,6 +2802,11 @@ public:
              << formation_health << ","
              << goal_prog << ","
              << crit << ","
+             << mean_shell_error << ","
+             << spherical_coverage << ","
+             << vertical_protection << ","
+             << upper_decoys << ","
+             << lower_decoys << ","
              << (mission_complete ? 1 : 0)
              << "\n";
       } else {
@@ -2443,6 +2819,10 @@ public:
              << " min_od=" << min_od
              << " lambda2_proxy=" << lambda2
              << " min_neighbors=" << min_neighbors
+             << " components=" << num_components
+             << " largest_comp=" << largest_component_fraction
+             << " bridge_pairs=" << last_bridge_pairs
+             << " bridge_dist=" << last_bridge_distance
              << " Pinfl=" << prot_infl_mean
              << " Pdec=" << prot_dec_mean
              << " Sinfl=" << struct_infl_mean
@@ -2450,6 +2830,11 @@ public:
              << " Jmargin=" << margin_combined_mean
              << " health=" << formation_health
              << " crit=" << crit
+             << " shell_err=" << mean_shell_error
+             << " sph_cov=" << spherical_coverage
+             << " vert=" << vertical_protection
+             << " upper=" << upper_decoys
+             << " lower=" << lower_decoys
              << " mission_complete=" << (mission_complete ? 1 : 0)
              << std::endl;
       }
